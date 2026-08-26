@@ -155,6 +155,41 @@ def _migrate(conn: sqlite3.Connection) -> None:
                 raise
 
 
+def seed_if_empty(conn: Optional[sqlite3.Connection] = None) -> int:
+    """Load the catalog if there isn't one. Returns rows seeded (0 if none).
+
+    Wispbyte gives no shell, so `seed_catalog.py` cannot be run on the
+    server. Without this, a database created fresh on the panel comes up
+    with an empty catalog and the only way to fill it is typing every item
+    into a modal by hand.
+
+    Deliberately narrow: it fires ONLY when `items` is completely empty, so
+    it can never overwrite a price the owner has since changed, and it never
+    touches balances, orders or the ledger. It is loud either way -- a silent
+    seed would be indistinguishable from a database that quietly lost its
+    catalog.
+    """
+    with db_in(conn) as c:
+        existing = c.execute("SELECT COUNT(*) n FROM items").fetchone()["n"]
+    if existing:
+        return 0
+    seed = ROOT / "seed_catalog.py"
+    if not seed.exists():
+        print("[db] catalog is empty and seed_catalog.py is missing -- "
+              "add items through the admin panel.", flush=True)
+        return 0
+    import io
+    import contextlib
+    import runpy
+    print("[db] catalog is empty -- seeding from seed_catalog.py", flush=True)
+    with contextlib.redirect_stdout(io.StringIO()):
+        runpy.run_path(str(seed), run_name="__main__")
+    with db_in(conn) as c:
+        now = c.execute("SELECT COUNT(*) n FROM items").fetchone()["n"]
+    print(f"[db] seeded {now} catalog items", flush=True)
+    return now
+
+
 def get_config(key: str, default: str | None = None,
                conn: Optional[sqlite3.Connection] = None) -> str | None:
     with db_in(conn) as c:

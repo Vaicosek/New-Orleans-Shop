@@ -23,7 +23,7 @@ import logging
 import discord
 from discord.ext import commands
 
-from core import db, games, pricing
+from core import db, games, money, pricing
 from core.config import BotConfig, ConfigError, load_bot_config
 
 from .views.alerts import AlertAckView
@@ -127,9 +127,40 @@ class NolaBot(commands.Bot):
         lines.append(f"cogs loaded: {len(loaded)}/{len(COGS)}"
                      + (f"  MISSING: {', '.join(missing)}" if missing else ""))
         lines.append(f"currency: {pricing.CURRENCY} (gold ingots, whole numbers)")
+        lines.extend(_database_lines())
         lines.append("=" * 60)
 
         print("\n".join(lines), flush=True)
+
+
+def _database_lines() -> list[str]:
+    """Database facts for the boot block.
+
+    There is no shell on the panel, so this print is the only way to see
+    whether the database is the one you think it is. Reports its path,
+    journal mode, catalog size and treasury balances -- an empty treasury
+    is the difference between a working shop and every payout failing, and
+    it is invisible until someone tries to get paid.
+    """
+    out: list[str] = []
+    try:
+        with db.db() as c:
+            items = c.execute("SELECT COUNT(*) n FROM items WHERE active=1").fetchone()["n"]
+            mode = c.execute("PRAGMA journal_mode").fetchone()[0]
+            fk = c.execute("PRAGMA foreign_keys").fetchone()[0]
+        out.append(f"database: {db.DB_PATH}")
+        out.append(f"  journal={mode}  foreign_keys={'on' if fk else 'OFF'}  items={items}")
+        funded = []
+        for subject, label in money.TREASURY_NAMES.items():
+            bal = money.balance(subject)
+            funded.append(f"{label} {bal.coins:,}")
+        out.append("  treasuries: " + "  ".join(funded))
+        if all(money.balance(s).coins == 0 for s in money.TREASURY_NAMES):
+            out.append("  WARNING: every treasury is empty -- order payouts and bets "
+                       "will fail until an owner funds one (/admin -> Fund treasury).")
+    except Exception as err:                      # never let diagnostics stop a boot
+        out.append(f"database: UNREADABLE -- {err}")
+    return out
 
 
 def build_bot() -> NolaBot:
@@ -145,6 +176,7 @@ def build_bot() -> NolaBot:
         print(f"FATAL: {err}", flush=True)
         raise
     db.init_db()
+    db.seed_if_empty()
     return NolaBot(config)
 
 
