@@ -35,7 +35,7 @@ os.environ["NOLA_DB_PATH"] = str(Path(_tmp) / "test.db")
 # short/rotated cases specifically, then restores a real one afterwards.
 os.environ["NOLA_GAME_SEED_SECRET"] = "attack-file-baseline-real-secret-0123456789"
 
-from core import db, money, games, predictions              # noqa: E402
+from core import audit, db, money, games, predictions       # noqa: E402
 
 FAILS: list[str] = []
 
@@ -487,6 +487,7 @@ def check_invariant(label: str, res: dict) -> None:
 # 4a: a single staker, 1 coin, wins -- gets their coin back, no one to profit from
 reset()
 money.mint("u:200", 10, service="owner", reason="seed")
+age_wallet("u:200")
 mkt = predictions.open_market("solo 1-coin", ["yes", "no"], created_by="owner", rake_bps=500)
 predictions.stake(mkt, "u:200", "yes", 1)
 predictions.close(mkt)
@@ -499,6 +500,8 @@ check("4a solo staker gets exactly their 1 coin back (no other side to take from
 reset()
 money.mint("u:210", 1000, service="owner", reason="seed")
 money.mint("u:211", 1000, service="owner", reason="seed")
+age_wallet("u:210")
+age_wallet("u:211")
 mkt = predictions.open_market("all losers", ["yes", "no"], created_by="owner", rake_bps=1000)
 predictions.stake(mkt, "u:210", "no", 300)
 predictions.stake(mkt, "u:211", "no", 400)
@@ -522,6 +525,8 @@ check("4c empty market resolves without error to all-zero", res == {
 reset()
 money.mint("u:220", 1000, service="owner", reason="seed")
 money.mint("u:221", 1000, service="owner", reason="seed")
+age_wallet("u:220")
+age_wallet("u:221")
 mkt = predictions.open_market("max rake", ["yes", "no"], created_by="owner", rake_bps=1000)
 predictions.stake(mkt, "u:220", "yes", 500)
 predictions.stake(mkt, "u:221", "no", 500)
@@ -536,6 +541,7 @@ raises("4e rake_bps above the schema cap (1000) is rejected at the DB layer",
 # 4f: one subject holds the entire pool by staking on every outcome themselves
 reset()
 money.mint("u:230", 1000, service="owner", reason="seed")
+age_wallet("u:230")
 mkt = predictions.open_market("self hedge", ["yes", "no"], created_by="owner", rake_bps=250)
 predictions.stake(mkt, "u:230", "yes", 300)
 predictions.stake(mkt, "u:230", "no", 700)
@@ -548,13 +554,19 @@ check("4f self-hedged subject cannot come out ahead of their own pool minus rake
 print("\n[4g] does splitting a stake into many small ones reach the remainder?")
 worst_gain = None
 for trial, (total, n_parts, other_amount, rake_bps) in enumerate([
-    (997, 7, 1009, 0), (1000, 10, 333, 250), (12345, 37, 6789, 500),
-    (50, 50, 77, 1000), (999983, 41, 500000, 999),
+    # Every `total`/`other_amount` here is <= MAX_BET (5,000): predictions.stake
+    # now enforces the same MAX_BET a single casino bet does (core/wagering.py),
+    # so the "control" side of this comparison -- ONE stake of `total` -- must
+    # itself be a legal single stake, not just the split side.
+    (997, 7, 1009, 0), (1000, 10, 333, 250), (4999, 37, 3331, 500),
+    (50, 50, 77, 1000), (4993, 41, 4987, 999),
 ]):
     # control: ONE stake of `total`
     reset()
     money.mint("u:300", total + 1, service="owner", reason="seed")
     money.mint("u:301", other_amount + 1, service="owner", reason="seed")
+    age_wallet("u:300")
+    age_wallet("u:301")
     mkt_c = predictions.open_market(f"split-ctl-{trial}", ["A", "B"], created_by="owner",
                                      rake_bps=rake_bps)
     predictions.stake(mkt_c, "u:300", "A", total)
@@ -566,6 +578,8 @@ for trial, (total, n_parts, other_amount, rake_bps) in enumerate([
     reset()
     money.mint("u:300", total + 1, service="owner", reason="seed")
     money.mint("u:301", other_amount + 1, service="owner", reason="seed")
+    age_wallet("u:300")
+    age_wallet("u:301")
     mkt_e = predictions.open_market(f"split-exp-{trial}", ["A", "B"], created_by="owner",
                                      rake_bps=rake_bps)
     base, rem = divmod(total, n_parts)
@@ -595,6 +609,7 @@ print("\n[5] void() and resolve() raced with real concurrent threads")
 reset()
 for j in range(400, 404):
     money.mint(f"u:{j}", 1000, service="owner", reason="seed")
+    age_wallet(f"u:{j}")
 mkt5 = predictions.open_market("void vs resolve race", ["yes", "no"], created_by="owner")
 for j in range(400, 404):
     predictions.stake(mkt5, f"u:{j}", "yes" if j % 2 else "no", 200)
@@ -683,6 +698,255 @@ check("self-exclusion still blocks any NEW bet for that subject",
 raises("a self-excluded subject cannot open a new bet even in a fresh round",
        money.GamblingBlocked, games.place_bet,
        games.open_round("coinflip", "x", 1), "u:600", "heads", 10)
+
+
+# ============================================================================
+# REGRESSION 7: an unpayable casino win must never be rolled back and
+# reported to the player as a failed bet (finding 1). games.py:448.
+# ============================================================================
+print("\n[7] REGRESSION: house insolvency is refused up front, and an "
+      "unpayable WIN never destroys the round")
+
+# 7a: refuse a bet up front when the house could not fund it even in the
+# best case for the player -- before any hold is placed, before any row
+# exists for it.
+reset()
+# money.ensure_wallet only ever RAISES an existing floor (deficit_floor=0 is
+# its own "no floor requested" sentinel, not "set the floor to zero") -- so
+# to actually shrink reset()'s 1,000,000 floor back down for this test, set
+# it directly.
+with db.db() as c:
+    c.execute("UPDATE wallets SET deficit_floor = 0 WHERE subject = 'treasury:games'")
+money.mint("u:700", 100_000, service="owner", reason="seed")
+age_wallet("u:700")
+rid7a = games.open_round("coinflip", "solvency-precheck", 0)
+raises("a bet the house could not pay even if it won is refused up front",
+       games.HouseInsolvent, games.place_bet, rid7a, "u:700", "heads", 100)
+with db.db() as c:
+    bets_after = c.execute(
+        "SELECT COUNT(*) AS n FROM game_bets WHERE round_id = ?", (rid7a,)
+    ).fetchone()["n"]
+check("the refused bet left no game_bets row and no hold behind",
+      bets_after == 0 and money.balance("u:700").held == 0,
+      f"bets_after={bets_after} held={money.balance('u:700').held}")
+
+# 7b: the house COULD afford this bet's profit when it was placed, but is
+# drained (by something else) before settlement -- the exact race
+# place_bet's own pre-check cannot fully close. settle_round must NOT roll
+# the round back for it.
+reset()
+with db.db() as c:
+    c.execute("UPDATE wallets SET deficit_floor = 0 WHERE subject = 'treasury:games'")
+money.mint("treasury:games", 100, service="owner", reason="fund just enough for one payout")
+money.mint("u:701", 100_000, service="owner", reason="seed")
+age_wallet("u:701")
+
+rid7b = games.open_round("coinflip", "insolvent-win", 0)
+winner7b = true_outcome("coinflip", rid7b, "insolvent-win", 0)
+games.place_bet(rid7b, "u:701", winner7b, 100)   # profit_if_win=96 <= 100 available: passes the pre-check
+
+# Drain the treasury out from under the round directly -- standing in for a
+# concurrent bet elsewhere that wins first and empties it; the point here is
+# settle_round's behaviour when the transfer it attempts actually fails, not
+# reproducing the race that gets it there.
+money.ensure_wallet("u:owner_sink", service="owner")
+money.transfer("treasury:games", "u:owner_sink", 100, service="games", reason="drain for test")
+
+before_coins = money.balance("u:701").coins
+result7b = games.settle_round(rid7b)   # must not raise
+check("settle_round did not raise even though the treasury could not pay the win",
+      True)
+check("the bet settled as a win", result7b["results"][0]["win"] is True)
+check("the win is flagged as a pending payout, not silently swallowed",
+      result7b["results"][0]["payout_pending"] is True)
+check("the player's own stake was returned in full either way (release, not capture)",
+      money.balance("u:701").coins == before_coins and money.balance("u:701").held == 0,
+      f"coins={money.balance('u:701').coins} held={money.balance('u:701').held}")
+
+with db.db() as c:
+    round_row = c.execute("SELECT state FROM game_rounds WHERE id = ?", (rid7b,)).fetchone()
+    bet_row = c.execute(
+        "SELECT settled_event, payout_coins FROM game_bets WHERE round_id = ?", (rid7b,)
+    ).fetchone()
+check("the round is persisted as settled, never destroyed by the failed payout",
+      round_row is not None and round_row["state"] == "settled")
+check("the bet's settlement (payout decision) is persisted, never rolled back",
+      bet_row["settled_event"] is not None and bet_row["payout_coins"] == 196,
+      f"{dict(bet_row) if bet_row else None}")
+
+v7b = games.verify(rid7b)
+check("a pending-payout round is still fully, publicly verifiable", v7b["ok"] is True)
+
+debts7b = audit.pending_debts()
+check("the unpaid profit is a VISIBLE debt in the data, not a swallowed exception",
+      any(d["target"] == f"game_round:{rid7b}" and d["manual_coins"] == 96 for d in debts7b),
+      f"{debts7b}")
+
+# calling settle_round again must not try (and fail) to pay the same bet twice
+result7b_retry = games.settle_round(rid7b)
+check("re-settling an already-settled round finds nothing left to claim",
+      result7b_retry["results"] == [])
+
+
+# ============================================================================
+# REGRESSION 8: predictions.stake shares the SAME wagering guard as
+# games.place_bet (finding 2), and open exposure is scoped per kind so
+# neither kind locks a subject out of the other (finding 5).
+# ============================================================================
+print("\n[8] REGRESSION: predictions.stake is guarded like a casino bet, and "
+      "per-kind exposure does not cross-contaminate")
+
+# 8a: account age and MAX_BET, exactly as reported -- a seconds-old wallet
+# could stake 18x MAX_BET while the SAME wallet was correctly refused a
+# 1-coin coinflip.
+reset()
+money.mint("u:800", 1_000_000, service="owner", reason="seed")   # brand new on purpose
+mkt8 = predictions.open_market("account age test", ["yes", "no"], created_by="owner")
+raises("a seconds-old wallet cannot stake on a prediction market either",
+       predictions.WagerRefused, predictions.stake, mkt8, "u:800", "yes", 1)
+
+age_wallet("u:800")
+raises("even once aged, a stake of 18x MAX_BET is refused -- not just the age check",
+       predictions.WagerRefused, predictions.stake, mkt8, "u:800", "yes", 90_000)
+with db.db() as c:
+    n_stakes = c.execute(
+        "SELECT COUNT(*) AS n FROM pred_stakes WHERE subject = 'u:800'"
+    ).fetchone()["n"]
+check("neither refused attempt left a pred_stakes row or a hold behind",
+      n_stakes == 0 and money.balance("u:800").held == 0)
+
+predictions.stake(mkt8, "u:800", "yes", 1_000)   # a legal, in-limits stake still works
+check("a legal, in-limits stake is still accepted", money.balance("u:800").held == 1_000)
+
+# 8b: a settled prediction LOSS now reaches gambling_day, and the SHARED
+# daily cap actually gates a later casino bet for it -- losses used to never
+# reach gambling_day and so were invisible to MAX_DAILY_LOSS forever.
+reset()
+money.mint("u:801", 1_000_000, service="owner", reason="seed")
+age_wallet("u:801")
+total_pred_loss = 0
+for i in range(4):
+    mkt_i = predictions.open_market(f"loss visibility {i}", ["yes", "no"], created_by="owner")
+    predictions.stake(mkt_i, "u:801", "no", 4_000)
+    predictions.resolve(mkt_i, "yes", money.new_event_id("pred.resolve"))  # nobody backs "yes": total loss
+    total_pred_loss += 4_000
+
+with db.db() as c:
+    lost_row = c.execute(
+        "SELECT lost FROM gambling_day WHERE subject = ? AND day = date('now')", ("u:801",)
+    ).fetchone()
+check("settled prediction losses accumulate in gambling_day -- no longer invisible "
+      "to the daily cap forever",
+      lost_row is not None and lost_row["lost"] == total_pred_loss,
+      f"{dict(lost_row) if lost_row else None} vs {total_pred_loss}")
+
+rid8b = games.open_round("coinflip", "post-pred-loss", 0)
+raises("a casino bet that would push the SHARED daily cap over MAX_DAILY_LOSS is "
+       "refused, counting today's already-realized prediction losses",
+       games.DailyLossExceeded, games.place_bet, rid8b, "u:801", "heads", 5_000)
+games.place_bet(rid8b, "u:801", "heads", 4_000)   # exactly fills the remaining shared room
+check("a bet that exactly fills the remaining SHARED daily-loss room is accepted",
+      money.balance("u:801").held == 4_000)
+
+# 8c: an OPEN position of one kind must not gate the other kind (finding 5) --
+# only realized (settled) loss is shared; open exposure is scoped per kind.
+reset()
+money.mint("u:803", 1_000_000, service="owner", reason="seed")
+age_wallet("u:803")
+mkt8c = predictions.open_market("open exposure", ["yes", "no"], created_by="owner")
+for i in range(4):
+    predictions.stake(mkt8c, "u:803", "yes", 4_500)   # left OPEN -- never resolved or voided
+check("this subject now has 18,000 in OPEN prediction exposure",
+      money.balance("u:803").held == 18_000)
+
+rid8c = games.open_round("coinflip", "cross-kind-exposure", 0)
+games.place_bet(rid8c, "u:803", "heads", 4_000)
+check("an open prediction position does NOT lock this subject out of the casino: "
+      "a casino bet adding only 4,000 of its OWN exposure is accepted even though "
+      "combined open exposure across both kinds is 22,000 (over MAX_DAILY_LOSS)",
+      money.balance("u:803").held == 18_000 + 4_000,
+      f"held={money.balance('u:803').held}")
+
+mkt8c2 = predictions.open_market("cross-kind reverse", ["yes", "no"], created_by="owner")
+predictions.stake(mkt8c2, "u:803", "yes", 1_000)
+check("the reverse holds too: an open casino position does not lock this subject "
+      "out of predictions either",
+      money.balance("u:803").held == 18_000 + 4_000 + 1_000,
+      f"held={money.balance('u:803').held}")
+
+
+# ============================================================================
+# REGRESSION 9: prediction resolve/void and casino settlement write
+# audit_actions rows, in the same transaction, with reverse ops (finding 3).
+# core/schema.sql:87.
+# ============================================================================
+print("\n[9] REGRESSION: prediction resolve/void and casino settlement are audited")
+
+reset()
+money.mint("u:900", 100_000, service="owner", reason="seed")
+age_wallet("u:900")
+rid9 = games.open_round("dice", "audit-check", 0)
+games.place_bet(rid9, "u:900", "1", 100)
+games.settle_round(rid9)
+
+with db.db() as c:
+    rows9 = c.execute(
+        "SELECT * FROM audit_actions WHERE kind = 'game.settle' AND target = ?",
+        (f"game_round:{rid9}",),
+    ).fetchall()
+check("settle_round wrote exactly one audit row", len(rows9) == 1, f"{len(rows9)}")
+if rows9:
+    row9 = dict(rows9[0])
+    check("the settlement audit row names a real actor", row9["actor"] == "system:games")
+    ops9 = audit.get(row9["id"])["ops"]
+    check("ops_json names a real ledger primitive for the one bet settled",
+          len(ops9) == 1 and ops9[0]["op"] in ("capture_hold", "transfer", "debt"), f"{ops9}")
+
+reset()
+money.mint("u:901", 1_000, service="owner", reason="seed")
+age_wallet("u:901")
+mkt9 = predictions.open_market("audit replay", ["yes", "no"], created_by="owner")
+predictions.stake(mkt9, "u:901", "yes", 200)
+ev9 = money.new_event_id("pred.resolve")
+predictions.resolve(mkt9, "yes", ev9, actor="u:staffer")
+predictions.resolve(mkt9, "yes", ev9, actor="u:staffer")   # replay, same event id
+
+with db.db() as c:
+    n9 = c.execute(
+        "SELECT COUNT(*) AS n FROM audit_actions WHERE kind = 'prediction.resolve' "
+        "AND target = ?", (f"pred_market:{mkt9}",),
+    ).fetchone()["n"]
+    actor9 = c.execute(
+        "SELECT actor FROM audit_actions WHERE kind = 'prediction.resolve' AND target = ?",
+        (f"pred_market:{mkt9}",),
+    ).fetchone()["actor"]
+check("a resolve() replay with the SAME event id writes no duplicate audit row",
+      n9 == 1, f"{n9}")
+check("the resolve audit row carries the actor that was passed in",
+      actor9 == "u:staffer")
+
+reset()
+money.mint("u:902", 1_000, service="owner", reason="seed")
+age_wallet("u:902")
+mkt9v = predictions.open_market("audit void", ["yes", "no"], created_by="owner")
+predictions.stake(mkt9v, "u:902", "yes", 300)
+predictions.void(mkt9v, actor="u:staffer2")
+with db.db() as c:
+    vrow = c.execute(
+        "SELECT * FROM audit_actions WHERE kind = 'prediction.void' AND target = ?",
+        (f"pred_market:{mkt9v}",),
+    ).fetchone()
+check("void() wrote an audit row naming the actor",
+      vrow is not None and vrow["actor"] == "u:staffer2")
+
+predictions.void(mkt9v, actor="u:staffer2")   # already voided -- nothing left to release
+with db.db() as c:
+    n9v = c.execute(
+        "SELECT COUNT(*) AS n FROM audit_actions WHERE kind = 'prediction.void' "
+        "AND target = ?", (f"pred_market:{mkt9v}",),
+    ).fetchone()["n"]
+check("re-voiding an already-voided market (nothing released) adds no audit row",
+      n9v == 1, f"{n9v}")
 
 
 # ============================================================================

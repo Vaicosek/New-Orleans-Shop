@@ -12,11 +12,21 @@ from __future__ import annotations
 from aiohttp import web
 
 from core.db import connection
-from core.money import balance, history
+from core.money import balance, public_history
 from core.pricing import price_label
 
 from ..auth import resolve_identity
 from ..shell import esc, page
+
+
+def _visible_history(subject: str, limit: int = 30) -> list[dict]:
+    """Ledger rows this page may show.
+
+    `core.money.public_history` decides what that means -- see CONTRACT.md
+    sections 1 and 9. This page does not re-implement the rule and does not
+    filter after fetching; it asks core for the public view.
+    """
+    return public_history(subject, limit=limit)
 
 
 def _my_claims(subject: str) -> list[dict]:
@@ -65,7 +75,7 @@ async def me(request: web.Request) -> web.Response:
 
     bal = balance(identity.subject)
     claims = _my_claims(identity.subject)
-    entries = history(identity.subject, limit=30)
+    entries = _visible_history(identity.subject, limit=30)
 
     if claims:
         claims_table = (

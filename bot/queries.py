@@ -65,9 +65,13 @@ def list_open_markets(*, include_closed: bool = False, limit: int = 25) -> list[
         for r in rows:
             d = dict(r)
             outs = c.execute(
-                "SELECT label FROM pred_outcomes WHERE market_id = ? ORDER BY id", (d["id"],)
+                "SELECT id, label FROM pred_outcomes WHERE market_id = ? ORDER BY id", (d["id"],)
             ).fetchall()
-            d["outcomes"] = [o["label"] for o in outs]
+            # (id, label) pairs, never bare labels -- a picker built on this
+            # keys its Select values on `id`, not on outcome text, so a long
+            # or unusual outcome name can never break the component (see
+            # bot/views/pickers.py).
+            d["outcomes"] = [{"id": o["id"], "label": o["label"]} for o in outs]
             pool = c.execute(
                 "SELECT COALESCE(SUM(amount), 0) AS n FROM pred_stakes WHERE market_id = ?",
                 (d["id"],),
@@ -87,9 +91,9 @@ def get_market_detail(market_id: int) -> Optional[dict[str, Any]]:
             return None
         d = dict(row)
         outs = c.execute(
-            "SELECT label FROM pred_outcomes WHERE market_id = ? ORDER BY id", (market_id,)
+            "SELECT id, label FROM pred_outcomes WHERE market_id = ? ORDER BY id", (market_id,)
         ).fetchall()
-        d["outcomes"] = [o["label"] for o in outs]
+        d["outcomes"] = [{"id": o["id"], "label": o["label"]} for o in outs]
         return d
 
 

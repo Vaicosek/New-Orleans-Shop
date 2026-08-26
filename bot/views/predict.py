@@ -11,30 +11,31 @@ import discord
 from core import money
 
 from . import pickers
-from ..ui.embed import money_text, panel_embed, rows
+from ..ui.embed import SEP, money_text, panel_embed, rows
 from .. import queries
 
 
 def build_markets_embed() -> discord.Embed:
     markets = queries.list_open_markets(limit=15)
     lines = [
-        f"{m['question']}  --  pool {m['pool']:,}  --  outcomes: {', '.join(m['outcomes'])}"
+        f"{m['question']}  {SEP} pool {money_text(m['pool'])}  {SEP} "
+        f"outcomes: {', '.join(o['label'] for o in m['outcomes'])}"
         for m in markets
     ]
     return panel_embed("Open prediction markets", rows(lines, empty_text="No open markets."))
 
 
-def build_positions_embed(subject: str, currency_name: str) -> discord.Embed:
+def build_positions_embed(subject: str) -> discord.Embed:
     stakes = queries.list_user_stakes(subject)
     lines = []
     for s in stakes:
         state = s["market_status"]
         payout_text = ""
         if s["payout_coins"] is not None:
-            payout_text = f"  --  paid {money_text(s['payout_coins'], currency_name)}"
+            payout_text = f"  {SEP} paid {money_text(s['payout_coins'])}"
         lines.append(
-            f"{s['question']}  --  {s['outcome_label']}  --  staked "
-            f"{money_text(s['amount'], currency_name)}  ({state}){payout_text}"
+            f"{s['question']}  {SEP} {s['outcome_label']}  {SEP} staked "
+            f"{money_text(s['amount'])}  ({state}){payout_text}"
         )
     return panel_embed("Your positions", rows(lines, empty_text="No positions yet."))
 
@@ -43,12 +44,11 @@ class _StakeAmountModal(discord.ui.Modal):
     """The stake amount is free text (a quantity); the market and outcome
     are already resolved by the two pickers before this opens."""
 
-    def __init__(self, market: dict, outcome: str, subject: str, currency_name: str):
+    def __init__(self, market: dict, outcome: str, subject: str):
         super().__init__(title=f"Stake: {market['question']}"[:45], timeout=300)
         self.market, self.outcome, self.subject = market, outcome, subject
-        self.currency_name = currency_name
         self.amount = discord.ui.TextInput(
-            label=f"Amount ({currency_name}s)", placeholder="e.g. 100", max_length=10, required=True
+            label="Amount (g)", placeholder="e.g. 100", max_length=10, required=True
         )
         self.add_item(self.amount)
 
@@ -65,24 +65,24 @@ class _StakeAmountModal(discord.ui.Modal):
         bal = money.balance(self.subject)
         if amount > bal.available:
             await interaction.followup.send(
-                f"You only have {money_text(bal.available, self.currency_name)} available.",
+                f"You only have {money_text(bal.available)} available.",
                 ephemeral=True,
             )
             return
 
         await interaction.followup.send(
-            f"Stake {money_text(amount, self.currency_name)} on \"{self.outcome}\" in "
+            f"Stake {money_text(amount)} on \"{self.outcome}\" in "
             f"\"{self.market['question']}\"? This places a hold until the market resolves or voids.",
-            view=_StakeConfirmGate(self.market, self.outcome, self.subject, amount, self.currency_name),
+            view=_StakeConfirmGate(self.market, self.outcome, self.subject, amount),
             ephemeral=True,
         )
 
 
 class _StakeConfirmGate(discord.ui.View):
-    def __init__(self, market: dict, outcome: str, subject: str, amount: int, currency_name: str):
+    def __init__(self, market: dict, outcome: str, subject: str, amount: int):
         super().__init__(timeout=120)
         self.market, self.outcome, self.subject = market, outcome, subject
-        self.amount, self.currency_name = amount, currency_name
+        self.amount = amount
 
     @discord.ui.button(label="Confirm stake", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
@@ -98,16 +98,15 @@ class _StakeConfirmGate(discord.ui.View):
             await interaction.followup.send(f"Could not place that stake: {err}", ephemeral=True)
             return
         await interaction.followup.send(
-            f"Staked {money_text(self.amount, self.currency_name)} on \"{self.outcome}\".",
+            f"Staked {money_text(self.amount)} on \"{self.outcome}\".",
             ephemeral=True,
         )
 
 
 class PredictPanelView(discord.ui.View):
-    def __init__(self, owner_id: int, currency_name: str) -> None:
+    def __init__(self, owner_id: int) -> None:
         super().__init__(timeout=300)
         self.owner_id = owner_id
-        self.currency_name = currency_name
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.owner_id:
@@ -125,11 +124,19 @@ class PredictPanelView(discord.ui.View):
                 await inter.response.send_message("No open markets.", ephemeral=True)
                 return
             market = queries.get_market_detail(int(market_id_str))
-            outcome_options = [(label, label) for label in market["outcomes"]]
+            # Keyed on the outcome's id, never its label text -- an outcome
+            # label can be long or contain characters that make a poor
+            # Select value; the id is always short and stable.
+            by_id = {str(o["id"]): o["label"] for o in market["outcomes"]}
+            outcome_options = [(o["label"][:100], str(o["id"])) for o in market["outcomes"]]
 
-            async def outcome_picked(inter2: discord.Interaction, outcome: str) -> None:
+            async def outcome_picked(inter2: discord.Interaction, outcome_id_str: str) -> None:
+                outcome = by_id.get(outcome_id_str)
+                if outcome is None:
+                    await inter2.response.send_message("That outcome no longer exists.", ephemeral=True)
+                    return
                 await inter2.response.send_modal(
-                    _StakeAmountModal(market, outcome, money.user(self.owner_id), self.currency_name)
+                    _StakeAmountModal(market, outcome, money.user(self.owner_id))
                 )
 
             await inter.response.send_message(
@@ -147,5 +154,5 @@ class PredictPanelView(discord.ui.View):
     @discord.ui.button(label="My positions", style=discord.ButtonStyle.secondary)
     async def positions(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
         await interaction.response.defer(ephemeral=True)
-        embed = build_positions_embed(money.user(self.owner_id), self.currency_name)
+        embed = build_positions_embed(money.user(self.owner_id))
         await interaction.followup.send(embed=embed, ephemeral=True)

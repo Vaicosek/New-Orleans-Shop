@@ -18,18 +18,36 @@ from ..ui.embed import panel_embed, price_line, rows
 
 
 def build_shop_embed() -> discord.Embed:
-    items = catalog.search("", active_only=True, limit=20)
-    lines = []
-    for it in items:
-        qty, cap = it.get("qty") or 0, it.get("capacity") or 0
-        lines.append(
-            f"{price_line(it['name'], it['price_coins'], it['price_unit_pieces'], it['stack_size'])}  "
-            f"({qty}/{cap} in stock)"
-        )
-    return panel_embed(
-        "New Orleans shop",
-        rows(lines, empty_text="No items in the catalog yet."),
-    )
+    # Category -> subcategory -> item, same grouping the website's price
+    # sheet uses -- `catalog.categories_with_items` is the one place that
+    # order lives, so this never re-derives it and drifts from the site.
+    cats = catalog.categories_with_items(active_only=True, include_empty=False)
+    lines: list[str] = []
+    any_stock = False
+    for cat in cats:
+        lines.append(f"**{cat['name']}**")
+        for group in cat["groups"]:
+            if group["subcategory"]:
+                lines.append(f"_{group['subcategory']}_")
+            for it in group["items"]:
+                stock = catalog.get_stock(it["id"])
+                qty = stock["pieces"]
+                line = price_line(it["name"], it["price_coins"], it["price_unit_pieces"],
+                                   it["stack_size"])
+                # Omit the stock clause entirely for an unstocked item --
+                # "(0/3456 in stock)" on every row when nothing is stocked
+                # is noise, not information, and it wraps the row on a
+                # phone screen for no reason.
+                if qty > 0:
+                    any_stock = True
+                    line += f"  ({qty} in stock)"
+                lines.append(line)
+
+    if cats and not any_stock:
+        body = "The shop isn't stocked yet."
+    else:
+        body = rows(lines, empty_text="No items in the catalog yet.")
+    return panel_embed("New Orleans shop", body)
 
 
 class _QuantityModal(discord.ui.Modal):
@@ -68,7 +86,7 @@ class _QuantityModal(discord.ui.Modal):
 
         await interaction.followup.send(
             f"Opened order #{order_id}: {pieces} × {self.item['name']} "
-            f"({quote['price_label']}, worth {quote['total_coins']:,} coins at payout). "
+            f"({quote['price_label']}, worth {quote['total_coins']:,} g at payout). "
             f"Posted in the orders channel for workers to claim.",
             ephemeral=True,
         )
@@ -78,7 +96,12 @@ class _QuantityModal(discord.ui.Modal):
             channel = interaction.client.get_channel(self.channel_id)
         if channel is not None:
             embed = order_views.build_order_embed(order_id)
-            await channel.send(embed=embed, view=order_views.OrderCardView())
+            posted = await channel.send(embed=embed, view=order_views.OrderCardView())
+            # Write the message back onto the order. Persistent buttons
+            # re-resolve their subject from the message they sit on, so
+            # without this the card can never be refreshed after approval.
+            if posted is not None:
+                orders_core.set_message(order_id, str(channel.id), str(posted.id))
 
 
 class ShopPanelView(discord.ui.View):

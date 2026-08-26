@@ -62,18 +62,18 @@ def build_admin_embed(config) -> discord.Embed:
     return panel_embed("Admin", body)
 
 
-def build_treasury_embed(currency_name: str) -> discord.Embed:
+def build_treasury_embed() -> discord.Embed:
     subjects = ["treasury:shop", "treasury:games", "treasury:house"]
     lines = []
     for s in subjects:
         bal = money.balance(s)
-        lines.append(f"{s}: {money_text(bal.coins, currency_name)} (held {bal.held:,})")
+        lines.append(f"{s}: {money_text(bal.coins)}  ({money_text(bal.held)} held)")
     return panel_embed("Treasury", rows(lines))
 
 
 class _AddItemModal(discord.ui.Modal, title="Add item"):
     name = discord.ui.TextInput(label="Name", max_length=100)
-    price = discord.ui.TextInput(label="Price per stack (coins)", max_length=10)
+    price = discord.ui.TextInput(label="Price per stack (g)", max_length=10)
     stack_size = discord.ui.TextInput(label="Stack size", default="64", max_length=6)
     barrel_slots = discord.ui.TextInput(label="Barrel slots", default="54", max_length=6)
 
@@ -105,7 +105,7 @@ class _RepriceModal(discord.ui.Modal):
         super().__init__(title=f"Reprice: {item['name']}"[:45], timeout=300)
         self.item = item
         self.price = discord.ui.TextInput(
-            label="New price (coins)", placeholder=str(item["price_coins"]),
+            label="New price (g)", placeholder=str(item["price_coins"]),
             max_length=10,
         )
         self.add_item(self.price)
@@ -198,25 +198,28 @@ class _ResolveConfirmModal(discord.ui.Modal):
         super().__init__(title="Confirm resolution", timeout=300)
         self.market, self.outcome, self.resolver = market, outcome, resolver
         self.confirm = discord.ui.TextInput(
-            label=f"Type the winning outcome: {outcome}", placeholder=outcome, max_length=100
+            label=f"Type the winning outcome: {outcome}"[:45],
+            placeholder="Type it exactly as shown above", max_length=100,
         )
         self.add_item(self.confirm)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
         if str(self.confirm.value).strip().lower() != self.outcome.strip().lower():
-            await interaction.followup.send("Outcome didn't match -- resolution cancelled.",
+            await interaction.followup.send("Outcome didn't match · resolution cancelled.",
                                              ephemeral=True)
             return
         event_id = money.new_event_id("pred.resolve")
         try:
-            result = predictions.resolve(self.market["id"], self.outcome, event_id)
-        except predictions.MarketError as err:
+            result = predictions.resolve(self.market["id"], self.outcome, event_id,
+                                        actor=self.resolver)
+        except (predictions.MarketError, money.MoneyError) as err:
             await interaction.followup.send(f"Could not resolve: {err}", ephemeral=True)
             return
         await interaction.followup.send(
             f"Resolved \"{self.market['question']}\" to \"{self.outcome}\". "
-            f"Pool {result['pool']:,}, paid out {result['paid_out']:,}, rake {result['rake']:,}.",
+            f"Pool {money_text(result['pool'])}, paid out {money_text(result['paid_out'])}, "
+            f"rake {money_text(result['rake'])}.",
             ephemeral=True,
         )
 
@@ -225,23 +228,31 @@ class _VoidConfirmModal(discord.ui.Modal):
     """Typed confirmation for an irreversible refund: the market's own
     question, its NAME -- never its id."""
 
-    def __init__(self, market: dict):
+    def __init__(self, market: dict, voider: str):
         super().__init__(title="Confirm void", timeout=300)
         self.market = market
+        # Who is doing this. Without it the audit row for the most
+        # destructive action in the bot reads "unknown".
+        self.resolver = voider
         short = market["question"][:90]
         self.confirm = discord.ui.TextInput(
-            label=f"Type the market question: {short}"[:100], placeholder=short, max_length=200
+            label=f"Type the market question: {short}"[:45],
+            placeholder="Type it exactly as shown above", max_length=200,
         )
         self.add_item(self.confirm)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
         if str(self.confirm.value).strip().lower() != self.market["question"].strip().lower():
-            await interaction.followup.send("Question didn't match -- void cancelled.", ephemeral=True)
+            await interaction.followup.send("Question didn't match · void cancelled.", ephemeral=True)
             return
-        released = predictions.void(self.market["id"])
+        try:
+            released = predictions.void(self.market["id"], actor=self.resolver)
+        except (predictions.MarketError, money.MoneyError) as err:
+            await interaction.followup.send(f"Could not void: {err}", ephemeral=True)
+            return
         await interaction.followup.send(
-            f"Voided \"{self.market['question']}\" -- released {released} stake(s).", ephemeral=True
+            f"Voided \"{self.market['question']}\" \u00b7 released {released} stake(s).", ephemeral=True
         )
 
 
@@ -297,12 +308,20 @@ class AdminPanelView(_StaffGatedView):
                 await inter.response.send_message("No markets to resolve.", ephemeral=True)
                 return
             market = queries.get_market_detail(int(market_id_str))
-            outcome_options = [(label, label) for label in market["outcomes"]]
+            # Keyed on the outcome's id, never its label text -- see
+            # bot/views/pickers.py's note on why a long label makes an
+            # unkeyed picker unbuildable.
+            by_id = {str(o["id"]): o["label"] for o in market["outcomes"]}
+            outcome_options = [(o["label"][:100], str(o["id"])) for o in market["outcomes"]]
 
-            async def outcome_picked(inter2: discord.Interaction, outcome: str) -> None:
+            async def outcome_picked(inter2: discord.Interaction, outcome_id_str: str) -> None:
+                outcome = by_id.get(outcome_id_str)
+                if outcome is None:
+                    await inter2.response.send_message("That outcome no longer exists.", ephemeral=True)
+                    return
                 await inter2.response.send_message(
                     f"Resolving \"{market['question']}\" to \"{outcome}\" will pay every winning "
-                    f"stake pro-rata out of a pool of {market['pool']:,}. This cannot be undone.",
+                    f"stake pro-rata out of a pool of {money_text(market['pool'])}. This cannot be undone.",
                     view=_ResolveGate(market, outcome, money.user(inter2.user.id)),
                     ephemeral=True,
                 )
@@ -331,7 +350,7 @@ class AdminPanelView(_StaffGatedView):
             market = queries.get_market_detail(int(market_id_str))
             await inter.response.send_message(
                 f"Voiding \"{market['question']}\" refunds every stake in full. This cannot be undone.",
-                view=_VoidGate(market),
+                view=_VoidGate(market, money.user(inter.user.id)),
                 ephemeral=True,
             )
 
@@ -344,8 +363,7 @@ class AdminPanelView(_StaffGatedView):
     @discord.ui.button(label="Treasury", style=discord.ButtonStyle.secondary, row=2)
     async def treasury(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
         await interaction.response.defer(ephemeral=True)
-        currency_name = self.config.currency_name if self.config else "coin"
-        await interaction.followup.send(embed=build_treasury_embed(currency_name), ephemeral=True)
+        await interaction.followup.send(embed=build_treasury_embed(), ephemeral=True)
 
 
 class _ResolveGate(discord.ui.View):
@@ -361,10 +379,11 @@ class _ResolveGate(discord.ui.View):
 
 
 class _VoidGate(discord.ui.View):
-    def __init__(self, market: dict) -> None:
+    def __init__(self, market: dict, voider: str) -> None:
         super().__init__(timeout=120)
         self.market = market
+        self.voider = voider
 
     @discord.ui.button(label="Confirm void", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
-        await interaction.response.send_modal(_VoidConfirmModal(self.market))
+        await interaction.response.send_modal(_VoidConfirmModal(self.market, self.voider))

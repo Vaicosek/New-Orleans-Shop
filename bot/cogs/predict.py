@@ -15,11 +15,9 @@ class PredictCog(commands.Cog):
     @app_commands.command(name="predict", description="Open prediction markets, stake, your positions.")
     async def predict(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
-        config = getattr(self.bot, "nola_config", None)
-        currency_name = config.currency_name if config else "coin"
         embed = build_markets_embed()
         await interaction.followup.send(
-            embed=embed, view=PredictPanelView(interaction.user.id, currency_name), ephemeral=True
+            embed=embed, view=PredictPanelView(interaction.user.id), ephemeral=True
         )
 
 

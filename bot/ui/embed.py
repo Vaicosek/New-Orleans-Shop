@@ -5,14 +5,21 @@ turns an item's stored price into display text -- both call
 `core.pricing.price_label()`, which always states both bases (stack and
 piece). Nothing here divides a price itself; that math lives in exactly one
 place, `core/pricing.py`, per CONTRACT.md section 5.
+
+There is exactly one currency in this shop -- gold ingots, whole numbers,
+symbol `g` (see `core.pricing.CURRENCY`). `money_text` renders every bare
+amount with that same symbol; nothing under `bot/` may pass a different
+name in, because a second currency word next to `price_label`'s `g` is how
+"1,450 coins" ends up two panels away from "1 g" for the same money.
 """
 from __future__ import annotations
 
 import discord
 
-from core.pricing import price_label
+from core.pricing import CURRENCY, price_label
 
 EMBED_COLOR = discord.Color.dark_gold()
+SEP = "·"  # ' · ' joins fields on one row -- never ASCII '--'.
 
 
 def rows(lines: list[str], *, empty_text: str = "") -> str:
@@ -25,11 +32,15 @@ def rows(lines: list[str], *, empty_text: str = "") -> str:
     return "\n".join(lines)
 
 
-def money_text(amount: int, currency_name: str = "coin") -> str:
+def money_text(amount: int) -> str:
+    """Render a bare amount in the shop's one currency. No name parameter --
+    an earlier version took `currency_name="coin"` and every call site had
+    to remember to override it, which is how a panel ends up printing
+    "coins" while the price list next to it prints "g" for the same money.
+    """
     if not isinstance(amount, int) or isinstance(amount, bool):
         raise TypeError("amount must be an int")
-    unit = currency_name if abs(amount) == 1 else f"{currency_name}s"
-    return f"{amount:,} {unit}"
+    return f"{amount:,} {CURRENCY}"
 
 
 def price_line(name: str, price_coins: int, price_unit_pieces: int,
@@ -40,7 +51,7 @@ def price_line(name: str, price_coins: int, price_unit_pieces: int,
     per-piece figure -- `stack_size` is passed through only so the label can
     say "stack of N" when the quote unit happens to be a full stack.
     """
-    return f"{name} -- {price_label(price_coins, price_unit_pieces, stack_size)}"
+    return f"{name} {SEP} {price_label(price_coins, price_unit_pieces, stack_size)}"
 
 
 def price_only(price_coins: int, price_unit_pieces: int,

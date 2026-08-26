@@ -17,7 +17,7 @@ sys.path.insert(0, str(ROOT))
 _tmp = tempfile.mkdtemp(prefix="nola-shop-test-")
 os.environ["NOLA_DB_PATH"] = str(Path(_tmp) / "test.db")
 
-from core import db, money, catalog, orders, alerts             # noqa: E402
+from core import audit, db, money, catalog, orders, alerts       # noqa: E402
 from core.pricing import charge, price_label                     # noqa: E402
 
 FAILS: list[str] = []
@@ -180,6 +180,44 @@ check("balance is unchanged after the refused re-approve",
 claims_after = orders.list_claims(order_id)
 check("the claim's paid_event was set exactly once",
       claims_after[0]["paid_event"] is not None and claims_after[0]["paid_coins"] == 640)
+
+# ------------------------------------------------------------------ REGRESSION: order approval is audited
+# core/schema.sql:87 -- audit_actions was never written by anything. Every
+# money-moving path in core/ must now write one row, in the SAME transaction
+# as the money it moved, naming who did it, what it moved, and how to
+# reverse it (CONTRACT.md sec 4, sec 8 rule 6).
+print("\nREGRESSION: order approval writes an audit_actions row")
+with db.db() as c:
+    audit_rows = c.execute(
+        "SELECT * FROM audit_actions WHERE kind = 'order.approve' AND target = ?",
+        (f"order:{order_id}",),
+    ).fetchall()
+check("approve() wrote exactly one audit row for this order",
+      len(audit_rows) == 1, f"got {len(audit_rows)}")
+if audit_rows:
+    row = dict(audit_rows[0])
+    check("the audit row names the real approver as actor", row["actor"] == "u:manager")
+    check("money_coins matches what approve() actually paid out",
+          row["money_coins"] == 640, f"got {row['money_coins']}")
+    check("manual_coins is 0 -- an order payout is never a human debt",
+          row["manual_coins"] == 0)
+    ops = audit.get(row["id"])["ops"]
+    check("ops_json records a reverse op that would claw the payout back",
+          any(op.get("reverse", {}) or {} and
+              op["reverse"].get("src") == "u:worker1" and
+              op["reverse"].get("dst") == "treasury:shop" and
+              op["reverse"].get("amount") == 640
+              for op in ops),
+          f"ops={ops}")
+
+# the refused re-approve above must NOT have written a second row
+with db.db() as c:
+    audit_rows_after = c.execute(
+        "SELECT COUNT(*) AS n FROM audit_actions WHERE kind = 'order.approve' AND target = ?",
+        (f"order:{order_id}",),
+    ).fetchone()["n"]
+check("a refused re-approve (NotClaimable, raised before any audit write) adds no audit row",
+      audit_rows_after == 1, f"got {audit_rows_after}")
 
 # ------------------------------------------------------------------ zero price
 print("\nzero-price approve raises rather than paying 0")

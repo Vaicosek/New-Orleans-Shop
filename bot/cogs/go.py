@@ -15,7 +15,7 @@ from .. import addressing
 from ..views.orders import build_order_embed, OrderCardView
 from ..views.alerts import build_alert_embed, AlertAckView
 from ..views.casino import build_verify_embed, RoundVerifyView
-from ..ui.embed import panel_embed
+from ..ui.embed import money_text, panel_embed
 from .. import queries
 
 
@@ -30,7 +30,7 @@ class GoCog(commands.Cog):
         found = addressing.resolve(code)
         if found is None:
             await interaction.followup.send(
-                "That code doesn't match anything -- check it and try again.", ephemeral=True
+                "That code doesn't match anything · check it and try again.", ephemeral=True
             )
             return
         kind, entity_id = found
@@ -40,7 +40,7 @@ class GoCog(commands.Cog):
                 embed=build_order_embed(int(entity_id)), view=OrderCardView(), ephemeral=True
             )
         elif kind == "item":
-            from core import catalog
+            from core import alerts, catalog
 
             try:
                 item = catalog.get_item(int(entity_id))
@@ -48,10 +48,21 @@ class GoCog(commands.Cog):
             except catalog.NoSuchItem:
                 await interaction.followup.send("That item no longer exists.", ephemeral=True)
                 return
-            due_row = {"item_id": item["id"], "name": item["name"], "qty": stock["pieces"],
-                       "threshold": 0, "capacity": stock["capacity"]}
-            await interaction.followup.send(embed=build_alert_embed(due_row), view=AlertAckView(),
-                                             ephemeral=True)
+            # Only show the real restock-alert card, with its live
+            # Acknowledge button, when this item is a GENUINE due alert
+            # right now (real threshold, actually crossed, not already
+            # suppressed) -- `alerts.due()` is the one place that decides
+            # that, same as the scheduled scan uses. A fabricated threshold
+            # here would print a fake "restock needed" card whose
+            # Acknowledge button still genuinely calls `alerts.acknowledge`,
+            # silencing the real alert for a condition that was never true.
+            due_row = next((d for d in alerts.due() if d["item_id"] == item["id"]), None)
+            if due_row is not None:
+                await interaction.followup.send(embed=build_alert_embed(due_row), view=AlertAckView(),
+                                                 ephemeral=True)
+            else:
+                body = f"{stock['pieces']} in stock (capacity {stock['capacity']})."
+                await interaction.followup.send(embed=panel_embed(item["name"], body), ephemeral=True)
         elif kind == "game_round":
             await interaction.followup.send(embed=build_verify_embed(entity_id), view=RoundVerifyView(),
                                              ephemeral=True)
@@ -60,7 +71,7 @@ class GoCog(commands.Cog):
             if market is None:
                 await interaction.followup.send("That market no longer exists.", ephemeral=True)
                 return
-            body = f"{market['question']}\nStatus: {market['status']}\nPool: {market['pool']:,}"
+            body = f"{market['question']}\nStatus: {market['status']}\nPool: {money_text(market['pool'])}"
             await interaction.followup.send(embed=panel_embed("Prediction market", body),
                                              ephemeral=True)
         else:

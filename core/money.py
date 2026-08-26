@@ -19,7 +19,7 @@ import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 from .db import connection, db_in
 
@@ -574,14 +574,48 @@ def fail(key: str, *, applied_unknown: bool = False,
         )
 
 
+# Ledger kinds that are wagering activity. The website may never show these:
+# wagering is Discord-only by the owner's explicit decision (CONTRACT.md 1, 9).
+WAGERING_REF_KINDS: frozenset[str] = frozenset({"game_round", "pred_market"})
+
+
+def public_history(subject: str, limit: int = 50, *,
+                   conn: Optional[sqlite3.Connection] = None) -> list[dict[str, Any]]:
+    """Ledger rows that may be shown on the PUBLIC website.
+
+    The website must never surface Discord-only activity (CONTRACT.md 1, 9).
+    That decision lives here, in core, not in a page: a caller asks for the
+    public view and gets it, so a new page cannot leak by forgetting a filter,
+    and the excluded set has exactly one definition.
+    """
+    return history(subject, limit=limit,
+                   exclude_ref_kinds=WAGERING_REF_KINDS, conn=conn)
+
+
 def history(subject: str, limit: int = 50, *,
+            exclude_ref_kinds: Iterable[str] | None = None,
             conn: Optional[sqlite3.Connection] = None) -> list[dict[str, Any]]:
+    """Recent ledger entries, newest first.
+
+    `exclude_ref_kinds` filters IN THE QUERY on purpose. The website was
+    fetching ten times the rows it needed and dropping the wagering ones in
+    Python afterwards; a boundary enforced after the fetch is one the next
+    page to forget the filter walks straight through, and it silently
+    returns fewer rows than `limit` asked for.
+    """
+    excluded = list(exclude_ref_kinds or ())
+    sql = ("SELECT ts, delta, balance_after, reason, service, ref_kind, ref_id "
+           "  FROM ledger_entries WHERE subject = ?")
+    params: list[Any] = [subject]
+    if excluded:
+        holes = ",".join("?" * len(excluded))
+        # IS NULL survives the NOT IN, which would otherwise drop unreffed rows.
+        sql += f" AND (ref_kind IS NULL OR ref_kind NOT IN ({holes}))"
+        params.extend(excluded)
+    sql += " ORDER BY id DESC LIMIT ?"
+    params.append(int(limit))
     with db_in(conn) as c:
-        rows = c.execute(
-            "SELECT ts, delta, balance_after, reason, service, ref_kind, ref_id "
-            "  FROM ledger_entries WHERE subject = ? ORDER BY id DESC LIMIT ?",
-            (subject, int(limit)),
-        ).fetchall()
+        rows = c.execute(sql, params).fetchall()
     return [dict(r) for r in rows]
 
 

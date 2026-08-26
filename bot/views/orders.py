@@ -8,6 +8,16 @@ re-resolves the order id from `interaction.message`'s embed footer -- never
 from `self` -- because `self` on a persistent view is whatever placeholder
 state boot registration gave it, not the order that message is actually
 about.
+
+Approve pays real money out of `treasury:shop` and is reachable from a
+PUBLIC message any member can see, so it is staff-gated on the interacting
+user before anything else runs -- never assumed from context. The old
+"type the item name back" step was never a real secret: `build_order_embed`
+prints that same name in the card body two lines above the button, so
+anyone who could see the card could pass the "confirmation". The actual
+guard is the staff check plus a plain, numbers-first preview; approving is
+otherwise a single confirm click, same shape as every other danger button
+here.
 """
 from __future__ import annotations
 
@@ -20,13 +30,16 @@ from core.pricing import price_label
 
 from .. import addressing, queries
 from ..permissions import is_staff
-from ..ui.embed import panel_embed, rows
+from ..ui.embed import SEP, money_text, panel_embed, rows
 
-_ORDER_MARK = re.compile(r"order:(\d+)")
+_ADDRESS_MARK = re.compile(r"address (\S+)")
 
 
 def _order_footer(order_id: int, code: str) -> str:
-    return f"address {code}  ·  order:{order_id}"
+    # The code alone -- never the raw order id next to it. `parse_order_id`
+    # recovers the id by resolving this same code, the one place a card is
+    # allowed to carry identity a user can also see.
+    return f"address {code}"
 
 
 def parse_order_id(message: discord.Message | None) -> int | None:
@@ -36,8 +49,16 @@ def parse_order_id(message: discord.Message | None) -> int | None:
     text = getattr(footer, "text", None)
     if not text:
         return None
-    m = _ORDER_MARK.search(text)
-    return int(m.group(1)) if m else None
+    m = _ADDRESS_MARK.search(text)
+    if not m:
+        return None
+    found = addressing.resolve(m.group(1))
+    if found is None or found[0] != "order":
+        return None
+    try:
+        return int(found[1])
+    except (TypeError, ValueError):
+        return None
 
 
 def build_order_embed(order_id: int) -> discord.Embed:
@@ -47,20 +68,39 @@ def build_order_embed(order_id: int) -> discord.Embed:
     claims = orders_core.list_claims(order_id)
     label = price_label(order["price_coins"], order["price_unit_pieces"], order["stack_size"])
     claim_lines = [
-        f"{c['worker']} -- claimed {c['pieces']}, delivered {c['delivered']}"
-        + (f" (paid {c['paid_coins']:,})" if c["paid_coins"] else "")
+        f"{c['worker']} {SEP} claimed {c['pieces']}, delivered {c['delivered']}"
+        + (f" (paid {money_text(c['paid_coins'])})" if c["paid_coins"] else "")
         for c in claims
     ]
     body = (
         f"{order['item_name']}\n"
         f"{label}\n"
-        f"Requested {order['requested_pieces']}  ·  produced {order['produced_pieces']}\n"
+        f"Requested {order['requested_pieces']}  {SEP} produced {order['produced_pieces']}\n"
         f"Status: {order['status']}\n\n"
         f"{rows(claim_lines, empty_text='No claims yet.')}"
     )
     code = addressing.mint("order", order_id)
     e = panel_embed(f"Order #{order_id}", body, footer=_order_footer(order_id, code))
     return e
+
+
+def order_card_view(order: dict) -> "OrderCardView":
+    """A card view with buttons disabled to match `order`'s ACTUAL state.
+
+    Every refresh reconstructs this from a fresh read rather than reusing
+    whatever view instance was on the message before -- a persistent view's
+    buttons carry no per-order state of their own, so "is this order still
+    approvable" has to come from the row, not from the widget.
+    """
+    view = OrderCardView()
+    closed = order["status"] in ("fulfilled", "cancelled")
+    for child in view.children:
+        custom_id = getattr(child, "custom_id", "")
+        if closed:
+            child.disabled = True
+        elif custom_id == "nola:order:approve" and order["status"] != "awaiting_verification":
+            child.disabled = True
+    return view
 
 
 class _PiecesModal(discord.ui.Modal):
@@ -99,48 +139,48 @@ class _PiecesModal(discord.ui.Modal):
         await _refresh_card(interaction, self.order_id)
 
 
-class ApproveConfirmModal(discord.ui.Modal):
-    """The irreversible step. The typed confirmation string is the item's
-    NAME, never the order id -- CONTRACT.md section 7."""
-
-    def __init__(self, order_id: int, approver: str, item_name: str):
-        super().__init__(title=f"Confirm approval: order #{order_id}", timeout=300)
-        self.order_id = order_id
-        self.approver = approver
-        self.item_name = item_name
-        self.confirm = discord.ui.TextInput(
-            label=f"Type the item name to confirm: {item_name}",
-            placeholder=item_name, max_length=100, required=True,
-        )
-        self.add_item(self.confirm)
-
-    async def on_submit(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer(ephemeral=True)
-        if str(self.confirm.value).strip().lower() != self.item_name.strip().lower():
-            await interaction.followup.send(
-                "That doesn't match the item name -- approval cancelled.", ephemeral=True
-            )
-            return
-        try:
-            result = orders_core.approve(self.order_id, self.approver)
-        except orders_core.OrderError as err:
-            await interaction.followup.send(f"Could not approve: {err}", ephemeral=True)
-            return
-        await interaction.followup.send(
-            f"Order #{self.order_id} approved -- paid {result['paid_coins']:,} coins "
-            f"across {result['paid_claims']} claim(s).",
-            ephemeral=True,
-        )
-        await _refresh_card(interaction, self.order_id)
-
-
 async def _refresh_card(interaction: discord.Interaction, order_id: int) -> None:
     """Best-effort: update the channel card in place so it never shows stale
-    status after an action taken from the panel rather than the card."""
+    status after an action taken from the panel rather than the card.
+
+    Only correct for a SINGLE hop from the real card -- `interaction.message`
+    here is whatever message the action was actually taken on, which is the
+    real card for a modal opened directly off its button, but NOT for an
+    action reached through an intermediate ephemeral message (see
+    `_refresh_card_by_ref` for that case)."""
     try:
-        embed = build_order_embed(order_id)
+        order = queries.get_order_detail(order_id)
+        if order is None:
+            return
         if interaction.message is not None and parse_order_id(interaction.message) == order_id:
-            await interaction.message.edit(embed=embed, view=OrderCardView())
+            embed = build_order_embed(order_id)
+            await interaction.message.edit(embed=embed, view=order_card_view(order))
+    except discord.HTTPException:
+        pass
+
+
+async def _refresh_card_by_ref(interaction: discord.Interaction, order_id: int,
+                                channel_id: int | None, message_id: int | None) -> None:
+    """Best-effort refresh keyed on the card's OWN channel/message id, never
+    on `interaction.message`.
+
+    Approve is reached from the card through an ephemeral confirm gate, so
+    by the time this runs `interaction.message` is that ephemeral gate
+    message, not the public card -- refreshing "whatever message this
+    interaction is on" would silently do nothing. `channel_id`/`message_id`
+    are captured back at the card's own button click, before that hop, and
+    carried through the gate for exactly this."""
+    if channel_id is None or message_id is None:
+        return
+    try:
+        order = queries.get_order_detail(order_id)
+        if order is None:
+            return
+        channel = interaction.client.get_channel(channel_id)
+        if channel is None:
+            channel = await interaction.client.fetch_channel(channel_id)
+        message = await channel.fetch_message(message_id)
+        await message.edit(embed=build_order_embed(order_id), view=order_card_view(order))
     except discord.HTTPException:
         pass
 
@@ -174,12 +214,19 @@ class OrderCardView(discord.ui.View):
             _PiecesModal("Pieces delivered", order_id, money.user(interaction.user.id), "deliver")
         )
 
-    @discord.ui.button(label="Approve", style=discord.ButtonStyle.success,
+    @discord.ui.button(label="Approve", style=discord.ButtonStyle.danger,
                         custom_id="nola:order:approve")
     async def approve_btn(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
         order_id = parse_order_id(interaction.message)
         if order_id is None:
             await interaction.response.send_message("Could not identify this order.", ephemeral=True)
+            return
+        # Staff gate FIRST, before anything else runs -- this button is on a
+        # message any member of the server can see and click; nothing about
+        # being able to press it implies being allowed to.
+        config = getattr(interaction.client, "nola_config", None)
+        if config is None or not is_staff(interaction.user, config):
+            await interaction.response.send_message("Approving orders is staff-only.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
         order = queries.get_order_detail(order_id)
@@ -195,21 +242,42 @@ class OrderCardView(discord.ui.View):
         await interaction.followup.send(
             f"Approving order #{order_id} ({order['item_name']}, {label}) will pay every "
             f"claim's delivered pieces from the shop treasury. Confirm below.",
-            view=_ApproveGate(order_id, money.user(interaction.user.id), order["item_name"]),
+            view=_ApproveGate(order_id, money.user(interaction.user.id),
+                               origin_channel_id=interaction.channel_id,
+                               origin_message_id=interaction.message.id),
             ephemeral=True,
         )
 
 
 class _ApproveGate(discord.ui.View):
-    def __init__(self, order_id: int, approver: str, item_name: str) -> None:
+    """No typed confirmation here -- the card printed the item name and
+    price already, and the staff gate on the button that opened this is the
+    real access control. A second danger-coloured click on real numbers is
+    the confirmation; a name you can already read is not a secret."""
+
+    def __init__(self, order_id: int, approver: str, *,
+                 origin_channel_id: int | None = None, origin_message_id: int | None = None):
         super().__init__(timeout=120)
-        self.order_id, self.approver, self.item_name = order_id, approver, item_name
+        self.order_id, self.approver = order_id, approver
+        self.origin_channel_id = origin_channel_id
+        self.origin_message_id = origin_message_id
 
     @discord.ui.button(label="Confirm approval", style=discord.ButtonStyle.danger)
-    async def confirm(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
-        await interaction.response.send_modal(
-            ApproveConfirmModal(self.order_id, self.approver, self.item_name)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        button.disabled = True
+        await interaction.response.edit_message(view=self)
+        try:
+            result = orders_core.approve(self.order_id, self.approver)
+        except (orders_core.OrderError, money.MoneyError) as err:
+            await interaction.followup.send(f"Could not approve: {err}", ephemeral=True)
+            return
+        await interaction.followup.send(
+            f"Order #{self.order_id} approved {SEP} paid {money_text(result['paid_coins'])} "
+            f"across {result['paid_claims']} claim(s).",
+            ephemeral=True,
         )
+        await _refresh_card_by_ref(interaction, self.order_id,
+                                    self.origin_channel_id, self.origin_message_id)
 
 
 class OrdersPanelView(discord.ui.View):
@@ -277,7 +345,7 @@ class OrdersPanelView(discord.ui.View):
             ephemeral=True,
         )
 
-    @discord.ui.button(label="Approve queue", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="Approve queue", style=discord.ButtonStyle.danger)
     async def approve_queue(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
         if not is_staff(interaction.user, self.config):
             await interaction.response.send_message(
@@ -285,7 +353,7 @@ class OrdersPanelView(discord.ui.View):
             )
             return
         pending = queries.list_orders(("awaiting_verification",))
-        options = [(f"#{o['id']} {o['item_name']} -- {o['produced_pieces']} pieces", str(o["id"]))
+        options = [(f"#{o['id']} {o['item_name']} {SEP} {o['produced_pieces']} pieces", str(o["id"]))
                    for o in pending]
 
         async def picked(inter: discord.Interaction, order_id_str: str) -> None:
@@ -297,7 +365,7 @@ class OrdersPanelView(discord.ui.View):
             await inter.response.send_message(
                 f"Approving order #{order['id']} ({order['item_name']}, {label}) will pay every "
                 f"claim's delivered pieces from the shop treasury. Confirm below.",
-                view=_ApproveGate(order["id"], money.user(inter.user.id), order["item_name"]),
+                view=_ApproveGate(order["id"], money.user(inter.user.id)),
                 ephemeral=True,
             )
 
@@ -312,7 +380,7 @@ class OrdersPanelView(discord.ui.View):
 def build_panel_embed() -> discord.Embed:
     open_orders = queries.list_orders(("open", "claimed", "awaiting_verification"), limit=15)
     lines = [
-        f"#{o['id']}  {o['item_name']}  --  {o['produced_pieces']}/{o['requested_pieces']}  "
+        f"#{o['id']}  {o['item_name']}  {SEP} {o['produced_pieces']}/{o['requested_pieces']}  "
         f"({o['status']})"
         for o in open_orders
     ]

@@ -179,3 +179,15 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+# --- New Orleans ---
+# The live database. It holds real balances, holds and the ledger; committing
+# it once puts real player money in the history for ever. (The sibling repo
+# needed an untrack_db.bat because this was learned the hard way.)
+neworleans.db
+*.db
+*.db-wal
+*.db-shm
+
+# Files parked for deletion. device_bash cannot rm, so anything being removed
+# lands here first -- it must never reach a commit.
+_to_delete/

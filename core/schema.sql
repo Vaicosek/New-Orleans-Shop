@@ -88,6 +88,11 @@ CREATE TABLE IF NOT EXISTS audit_actions (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     ts           TEXT    NOT NULL DEFAULT (datetime('now')),
     actor        TEXT    NOT NULL,
+    -- who/what this action moved money against or affected -- 'order:12',
+    -- 'pred_market:3', 'game_round:round.coinflip:...'. Free text, always
+    -- given: CONTRACT.md sec 4 promises "who did it", but a row with only
+    -- an actor and no target cannot say WHOM it was done to.
+    target       TEXT    NOT NULL,
     kind         TEXT    NOT NULL,
     summary      TEXT    NOT NULL,
     money_coins  INTEGER NOT NULL DEFAULT 0,

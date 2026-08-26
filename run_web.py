@@ -5,7 +5,6 @@ Applies the schema (idempotent) and serves the site. Supervised by
 """
 from __future__ import annotations
 
-import os
 
 from aiohttp import web
 

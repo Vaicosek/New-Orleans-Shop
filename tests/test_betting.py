@@ -52,6 +52,17 @@ def reset() -> None:
     money.ensure_wallet("treasury:games", deficit_floor=1_000_000, service="owner")
 
 
+def age_wallet(subject: str, days: int = 30) -> None:
+    """Push `subject`'s wallet past MIN_ACCOUNT_AGE_DAYS so a test can
+    exercise something other than the account-age guard itself -- both
+    games.place_bet and predictions.stake enforce it now (core/wagering.py)."""
+    with db.db() as c:
+        c.execute(
+            "UPDATE wallets SET created_at = datetime('now', ?) WHERE subject = ?",
+            (f"-{days} days", subject),
+        )
+
+
 db.init_db()
 
 # ------------------------------------------------------------------ coinflip end to end
@@ -190,6 +201,9 @@ reset()
 money.mint("u:10", 1000, service="owner", reason="seed")
 money.mint("u:11", 1000, service="owner", reason="seed")
 money.mint("u:12", 1000, service="owner", reason="seed")
+age_wallet("u:10")
+age_wallet("u:11")
+age_wallet("u:12")
 
 mkt = predictions.open_market("Who wins?", ["yes", "no"], created_by="owner", rake_bps=500)
 predictions.stake(mkt, "u:10", "yes", 300)
@@ -230,6 +244,8 @@ print("\npari-mutuel: nobody staked the winning outcome")
 reset()
 money.mint("u:20", 500, service="owner", reason="seed")
 money.mint("u:21", 500, service="owner", reason="seed")
+age_wallet("u:20")
+age_wallet("u:21")
 mkt2 = predictions.open_market("Coin toss", ["heads", "tails"], created_by="owner")
 predictions.stake(mkt2, "u:20", "heads", 200)
 predictions.stake(mkt2, "u:21", "heads", 150)
@@ -244,6 +260,8 @@ print("\nvoiding returns every stake exactly")
 reset()
 money.mint("u:30", 700, service="owner", reason="seed")
 money.mint("u:31", 900, service="owner", reason="seed")
+age_wallet("u:30")
+age_wallet("u:31")
 mkt3 = predictions.open_market("Will it rain?", ["yes", "no"], created_by="owner")
 predictions.stake(mkt3, "u:30", "yes", 250)
 predictions.stake(mkt3, "u:31", "no", 300)
@@ -268,6 +286,7 @@ raises("voiding an already-resolved market is refused", predictions.AlreadyResol
 print("\nprediction stakes respect the same money-layer guardrails")
 reset()
 money.mint("u:40", 1000, service="owner", reason="seed")
+age_wallet("u:40")
 money.set_flag("u:40", "gambling_blocked", service="owner", set_by="owner")
 mkt4 = predictions.open_market("Blocked test", ["a", "b"], created_by="owner")
 raises("a self-excluded wallet cannot stake", money.GamblingBlocked,
@@ -287,6 +306,7 @@ for trial in range(200):
     subjects = [f"u:{100 + i}" for i in range(n_players)]
     for s in subjects:
         money.mint(s, 100_000, service="owner", reason="seed")
+        age_wallet(s)
 
     mkt_r = predictions.open_market("random market", ["A", "B"], created_by="owner",
                                      rake_bps=rake_bps)

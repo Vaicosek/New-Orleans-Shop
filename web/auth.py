@@ -26,9 +26,15 @@ from aiohttp import ClientSession, web
 
 from core.config import env_ids, env_str
 from core.db import db_in
+from core.money import ensure_wallet
 
 COOKIE_NAME = "nola_session"
 SESSION_DAYS = 30
+
+# OAuth2 state, anti-CSRF for the login exchange only -- short-lived, its
+# own cookie, never confused with the session cookie above.
+STATE_COOKIE_NAME = "nola_oauth_state"
+STATE_MAX_AGE_SECONDS = 600
 
 DISCORD_API = "https://discord.com/api"
 AUTHORIZE_URL = f"{DISCORD_API}/oauth2/authorize"
@@ -62,6 +68,7 @@ class Identity:
     discord_id: str
     name: str
     staff: bool
+    csrf: str = ""         # this session's CSRF token; "" when there is no real session row
 
 
 def _now() -> str:
@@ -72,13 +79,23 @@ def _now() -> str:
 
 def create_session(discord_id: str, name: str, *,
                     conn: Optional[sqlite3.Connection] = None) -> tuple[str, str]:
-    """Open a session row for a Discord user. Returns (token, csrf)."""
+    """Open a session row for a Discord user. Returns (token, csrf).
+
+    `web_sessions.subject` is a foreign key into `wallets(subject)`. A
+    Discord user signing in for the first time has never touched the bot,
+    so no wallet row exists for them yet -- inserting the session straight
+    away throws the FK. `ensure_wallet` is idempotent (`ON CONFLICT DO
+    NOTHING`) and carries no deficit floor, so it needs no scope beyond
+    `service="web"`; it runs inside the same transaction as the session
+    insert so the two either both land or neither does.
+    """
     subject = f"u:{discord_id}"
     token = secrets.token_urlsafe(32)
     csrf = secrets.token_urlsafe(16)
     expires = (datetime.now(timezone.utc)
                + timedelta(days=SESSION_DAYS)).strftime("%Y-%m-%d %H:%M:%S")
     with db_in(conn) as c:
+        ensure_wallet(subject, service="web", conn=c)
         c.execute(
             "INSERT INTO web_sessions (token, subject, name, csrf, expires_at) "
             "VALUES (?, ?, ?, ?, ?)",
@@ -125,6 +142,7 @@ async def resolve_identity(request: web.Request) -> Optional[Identity]:
         discord_id=discord_id,
         name=row["name"] or discord_id,
         staff=is_staff(discord_id),
+        csrf=row["csrf"],
     )
 
 
@@ -134,20 +152,45 @@ async def login(request: web.Request) -> web.Response:
     client_id, redirect_uri = _client_id(), _redirect_uri()
     if not client_id or not redirect_uri:
         return web.Response(text="Sign-in is not configured yet.", status=503)
+    # `state` defends the OAuth2 sign-in exchange itself: without it, any site can
+    # send a victim's browser to /auth/callback with an attacker's own
+    # authorization code and log the victim into the attacker's Discord
+    # identity. Minted here, held in its own short-lived cookie, and checked
+    # against the callback's `state` query param before anything else runs.
+    state = secrets.token_urlsafe(24)
     params = {
         "client_id": client_id,
         "redirect_uri": redirect_uri,
         "response_type": "code",
         "scope": "identify",
+        "state": state,
     }
     query = "&".join(f"{k}={v}" for k, v in params.items())
-    return web.HTTPFound(f"{AUTHORIZE_URL}?{query}")
+    resp = web.HTTPFound(f"{AUTHORIZE_URL}?{query}")
+    resp.set_cookie(STATE_COOKIE_NAME, state, max_age=STATE_MAX_AGE_SECONDS,
+                     httponly=True, samesite="Lax")
+    return resp
 
 
 async def callback(request: web.Request) -> web.Response:
     code = request.query.get("code")
     if not code:
         return web.Response(text="Missing authorization code.", status=400)
+
+    # Reject before anything else runs (before we ever call Discord) if the
+    # `state` this callback carries does not match the one `login` minted and
+    # stashed in a cookie. Consumed once either way -- the cookie is cleared
+    # below on every path out of this function.
+    expected_state = request.cookies.get(STATE_COOKIE_NAME)
+    supplied_state = request.query.get("state")
+    if (not expected_state or not supplied_state
+            or not secrets.compare_digest(supplied_state, expected_state)):
+        resp = web.Response(
+            text="Invalid or expired sign-in attempt. Please try signing in again.",
+            status=400,
+        )
+        resp.del_cookie(STATE_COOKIE_NAME)
+        return resp
 
     data = {
         "client_id": _client_id(),
@@ -157,29 +200,46 @@ async def callback(request: web.Request) -> web.Response:
         "redirect_uri": _redirect_uri(),
     }
     async with ClientSession() as http:
-        async with http.post(TOKEN_URL, data=data) as resp:
-            if resp.status != 200:
-                return web.Response(text="Sign-in with Discord failed.", status=502)
-            token_body = await resp.json()
+        async with http.post(TOKEN_URL, data=data) as discord_resp:
+            if discord_resp.status != 200:
+                fail_resp = web.Response(text="Sign-in with Discord failed.", status=502)
+                fail_resp.del_cookie(STATE_COOKIE_NAME)
+                return fail_resp
+            token_body = await discord_resp.json()
         access_token = token_body.get("access_token")
-        async with http.get(ME_URL, headers={"Authorization": f"Bearer {access_token}"}) as resp:
-            if resp.status != 200:
-                return web.Response(text="Could not read the Discord profile.", status=502)
-            profile = await resp.json()
+        async with http.get(ME_URL, headers={"Authorization": f"Bearer {access_token}"}) as discord_resp:
+            if discord_resp.status != 200:
+                fail_resp = web.Response(text="Could not read the Discord profile.", status=502)
+                fail_resp.del_cookie(STATE_COOKIE_NAME)
+                return fail_resp
+            profile = await discord_resp.json()
 
     discord_id = str(profile["id"])
     name = profile.get("username", discord_id)
     token, _csrf = create_session(discord_id, name)
 
     resp = web.HTTPFound("/me")
+    resp.del_cookie(STATE_COOKIE_NAME)
     resp.set_cookie(COOKIE_NAME, token, max_age=SESSION_DAYS * 86400,
                      httponly=True, samesite="Lax")
     return resp
 
 
 async def logout(request: web.Request) -> web.Response:
+    """Sign out. The only state-changing route reachable without a fresh
+    OAuth sign-in exchange, so it is the route the session's own CSRF token
+    (minted alongside it in `create_session`, otherwise unused) protects: a
+    logout link embeds it, and a request presenting a session cookie but the
+    wrong (or no) csrf is refused rather than allowed to destroy someone
+    else's session via a forged cross-site request.
+    """
     token = request.cookies.get(COOKIE_NAME)
     if token:
+        row = _session_row(token)
+        if row is not None:
+            supplied = request.query.get("csrf", "")
+            if not secrets.compare_digest(supplied, row["csrf"] or ""):
+                return web.Response(text="Invalid or missing sign-out token.", status=403)
         destroy_session(token)
     resp = web.HTTPFound("/")
     resp.del_cookie(COOKIE_NAME)

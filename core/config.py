@@ -72,7 +72,6 @@ class BotConfig:
     alerts_channel_id: int
     staff_role_ids: tuple[int, ...]
     manager_role_ids: tuple[int, ...]
-    currency_name: str
     command_sync_guild_only: bool
 
     def guild_channel_ids(self) -> dict[str, int]:
@@ -95,6 +94,5 @@ def load_bot_config() -> BotConfig:
         alerts_channel_id=env_int("ALERTS_CHANNEL_ID", required=True),
         staff_role_ids=env_ids("STAFF_ROLE_IDS"),
         manager_role_ids=env_ids("MANAGER_ROLE_IDS"),
-        currency_name=env_str("CURRENCY_NAME", default="coin"),
         command_sync_guild_only=env_bool("COMMAND_SYNC_GUILD_ONLY", default=True),
     )

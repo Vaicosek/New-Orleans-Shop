@@ -24,7 +24,7 @@ if something must contradict it, this file changes first.
 |---|---|
 | Market id | `nola` |
 | Display name | New Orleans |
-| Currency | config `CURRENCY_NAME`, default "coin" |
+| Currency | Gold ingots, symbol `g`, whole numbers only -- `core.pricing.CURRENCY` (see S5). Stale: `core.config.currency_name`/`CURRENCY_NAME` still exists and defaults to "coin" but is no longer what any price renders; dead config for the integrator to retire. |
 | Wallet subjects | `u:<discord_id>`, `treasury:shop`, `treasury:games`, `treasury:house` |
 
 Real names everywhere a user looks. `nola` never appears in user-facing text.
@@ -86,7 +86,7 @@ inside an open transaction, it commits the caller's half-written work.
 
 | Table | Purpose |
 |---|---|
-| `items` | catalog. `price_stack_coins INTEGER`, `stack_size INTEGER`, `stackable` |
+| `items` | catalog. `price_coins INTEGER`, `price_unit_pieces INTEGER`, `stack_size INTEGER`, `stackable` (see S5) |
 | `stock` | live quantity per item, `capacity`, `updated_at` |
 | `stock_alerts` | per-item threshold + **`acked_until_qty`** (see §6) |
 | `orders` | `requested_pieces`, `produced_pieces`, `status`, `market_id` |
@@ -111,30 +111,57 @@ This is the single most repeated bug in the Abex economy and it is caused by sto
 `price / 64.0` at input. `300 / 64 = 4.6875` — a number that cannot be an integer coin,
 so the system carries floats forever and rounds differently in different call sites.
 
-New Orleans stores the number the owner actually types:
+New Orleans stores the number the owner actually types, plus how many pieces that
+number buys — two different things that used to be one column, and conflating them is
+a silent bug of its own (see the sapling example below):
 
-    price_stack_coins  INTEGER NOT NULL   -- what a stack of `stack_size` costs
-    stack_size         INTEGER NOT NULL DEFAULT 64
+    price_coins        INTEGER NOT NULL   -- what the owner typed, verbatim
+    price_unit_pieces  INTEGER NOT NULL DEFAULT 64   -- how many pieces `price_coins` buys
+    stack_size         INTEGER NOT NULL DEFAULT 64   -- MINECRAFT stack size, capacity maths only
 
-Charge for N pieces, integer arithmetic only, one rounding rule in one function:
+`price_unit_pieces` is the ONLY divisor a per-piece figure is ever taken against.
+`stack_size` never divides a price — it feeds `barrel_slots * stack_size` capacity maths
+and it names the unit in a price label ("stack of 64") when the quoted unit happens to
+be a full stack. The two used to be one column; that is exactly how an item that stacks
+to 64 but sells per 32 — saplings — got silently charged double.
 
-    def charge(n_pieces, price_stack_coins, stack_size):
+Charge for N pieces, integer arithmetic only, one rounding rule in one function
+(`core/pricing.py:charge`):
+
+    def charge(pieces, price_coins, unit_pieces=STACK):
         # half-up, no floats, deterministic
-        num = n_pieces * price_stack_coins * 2 + stack_size
-        return num // (stack_size * 2)
+        numerator = pieces * price_coins * 2 + unit_pieces
+        return numerator // (unit_pieces * 2)
 
 Consequences:
 - No float ever touches money. `core/money.py` refuses a non-`int` amount at the boundary.
-- The owner types 300 and the DB stores 300. Nothing is lossy at write time.
+- The owner types the price and the DB stores it verbatim. Nothing is lossy at write time.
 - Rounding happens once, in `charge()`, and is unit-tested against a table of known cases.
+- `price_unit_pieces` must never exceed `stack_size` (enforced by a schema CHECK) — the
+  quoted unit can be smaller than a stack, never bigger than one.
 
-**Every user-facing price row states both bases.** Never a bare number:
+**Worked example — the case the split exists for.** Saplings sell 1 gold per 32 pieces
+but stack to 64 in Minecraft: `price_coins=1`, `price_unit_pieces=32`, `stack_size=64`.
+A full 64-piece stack order is `charge(64, 1, 32)` = `(64*1*2 + 32) // 64` = `2` gold —
+**not** 1. Treating `stack_size` as the price divisor (the bug this split exists to make
+impossible) gives `charge(64, 1, 64)` = 1 gold instead, silently halving the price on
+every full-stack sapling order. Contract and code must always agree on which of the two
+numbers `charge()` divides by; `price_unit_pieces` is the only correct answer.
 
-    Honeycomb Block    300 / stack of 64      4.69 / piece
-    Honey Block        350 / stack of 64      5.47 / piece
+**Every user-facing price row states both bases**, via `core.pricing.price_label()`.
+Never a bare number:
+
+    Honeycomb Block    300 g / stack of 64   ·   4.69 g / piece
+    Honey Block         350 g / stack of 64   ·   5.47 g / piece
+    Sapling                1 g / 32           ·   0.03 g / piece
 
 Defaults from the brain, already correct, do not "fix" them:
-Honeycomb Block 300/stack, Honey Block 350/stack.
+Honeycomb Block 300 g/stack, Honey Block 350 g/stack.
+
+**Currency.** Gold ingots. Whole numbers — there is no fractional gold, so nothing in
+`core/pricing.py` ever needs a decimal type. Symbol `g`, printed after the number
+(`300 g`, never `g300` or a bare `300`). `core.pricing.CURRENCY` is the one place the
+symbol is defined; nothing else hardcodes it.
 
 ## 6. Restock alerts — with real suppression
 
@@ -287,7 +314,7 @@ access-granting id is ever written into this repo or the brain.
 
 ## 12. Open — John decides
 
-1. **Currency name.** Config default is "coin". Say the word and it changes.
+1. ~~**Currency name.**~~ Decided: gold ingots, symbol `g`, whole numbers (S2, S5). `core.config.currency_name`/`CURRENCY_NAME` is leftover from before that decision and no longer drives anything a price renders -- dead config for the integrator to retire.
 2. **Casino games beyond coinflip and dice.** Blackjack and roulette are real work; worth it
    only if people will actually play them.
 3. **Prediction market rake.** Default 0 — you take nothing. A rake makes you the house in a

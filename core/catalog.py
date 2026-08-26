@@ -28,7 +28,7 @@ import sqlite3
 from typing import Any, Optional
 
 from .db import db_in
-from .pricing import charge, price_label
+from .pricing import CURRENCY, charge, price_label
 
 
 class CatalogError(RuntimeError):
@@ -378,7 +378,7 @@ def quote(item_id: int, pieces: int, *,
         "pieces": pieces,
         "total_coins": total,
         "price_label": price_label(item["price_coins"], item["price_unit_pieces"], item["stack_size"]),
-        "total_label": f"{total:,} coins for {pieces} × {item['name']}",
+        "total_label": f"{total:,} {CURRENCY} for {pieces} × {item['name']}",
     }
 
 

@@ -15,7 +15,7 @@ from core import games, money
 
 from . import pickers
 from .. import addressing, queries
-from ..ui.embed import money_text, panel_embed, rows
+from ..ui.embed import SEP, money_text, panel_embed, rows
 
 _ROUND_MARK = re.compile(r"round:(\S+)")
 
@@ -27,7 +27,7 @@ SELECTION_LABELS = {
 
 
 def _round_footer(round_id: str, code: str) -> str:
-    return f"address {code}  ·  round:{round_id}"
+    return f"address {code}  {SEP} round:{round_id}"
 
 
 def parse_round_id(message: discord.Message | None) -> str | None:
@@ -41,7 +41,7 @@ def parse_round_id(message: discord.Message | None) -> str | None:
     return m.group(1) if m else None
 
 
-def build_result_embed(result: dict, currency_name: str) -> discord.Embed:
+def build_result_embed(result: dict) -> discord.Embed:
     bet = result["results"][0] if result["results"] else None
     game = result["game"]
     outcome = result["outcome"]
@@ -51,10 +51,10 @@ def build_result_embed(result: dict, currency_name: str) -> discord.Embed:
     else:
         verdict = "WIN" if bet["win"] else "loss"
         body = (
-            f"{GAME_LABELS.get(game, game)} -- {outcome_text}\n"
+            f"{GAME_LABELS.get(game, game)} {SEP} {outcome_text}\n"
             f"Selection: {bet['selection']}\n"
             f"Result: {verdict}\n"
-            f"Payout: {money_text(bet['payout'], currency_name)}"
+            f"Payout: {money_text(bet['payout'])}"
         )
     code = addressing.mint("game_round", result["round_id"])
     return panel_embed(
@@ -78,7 +78,7 @@ def build_verify_embed(round_id: str) -> discord.Embed:
         f"client_seed: {v['client_seed']}\n"
         f"nonce: {v['nonce']}"
     )
-    return panel_embed(f"Verify -- {v['game']} round", body)
+    return panel_embed(f"Verify {SEP} {v['game']} round", body)
 
 
 class RoundVerifyView(discord.ui.View):
@@ -102,12 +102,11 @@ class _BetModal(discord.ui.Modal):
     """The bet amount is genuinely free text (a quantity); game and
     selection are already resolved by the two pickers before this opens."""
 
-    def __init__(self, game: str, selection: str, subject: str, currency_name: str):
+    def __init__(self, game: str, selection: str, subject: str):
         super().__init__(title=f"Bet: {GAME_LABELS.get(game, game)}"[:45], timeout=300)
         self.game, self.selection, self.subject = game, selection, subject
-        self.currency_name = currency_name
         self.amount = discord.ui.TextInput(
-            label=f"Amount ({currency_name}s, max {games.MAX_BET:,})",
+            label=f"Amount (g, max {games.MAX_BET:,})",
             placeholder="e.g. 50", max_length=10, required=True,
         )
         self.add_item(self.amount)
@@ -132,15 +131,14 @@ class _BetModal(discord.ui.Modal):
             await interaction.followup.send(f"Could not place that bet: {err}", ephemeral=True)
             return
 
-        embed = build_result_embed(result, self.currency_name)
+        embed = build_result_embed(result)
         await interaction.followup.send(embed=embed, view=RoundVerifyView(), ephemeral=True)
 
 
 class CasinoPanelView(discord.ui.View):
-    def __init__(self, owner_id: int, currency_name: str) -> None:
+    def __init__(self, owner_id: int) -> None:
         super().__init__(timeout=300)
         self.owner_id = owner_id
-        self.currency_name = currency_name
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.owner_id:
@@ -157,7 +155,7 @@ class CasinoPanelView(discord.ui.View):
 
             async def selection_picked(inter2: discord.Interaction, selection: str) -> None:
                 await inter2.response.send_modal(
-                    _BetModal(game, selection, money.user(self.owner_id), self.currency_name)
+                    _BetModal(game, selection, money.user(self.owner_id))
                 )
 
             await inter.response.send_message(
@@ -177,9 +175,9 @@ class CasinoPanelView(discord.ui.View):
         await interaction.response.defer(ephemeral=True)
         bets = queries.list_user_bets(money.user(self.owner_id))
         lines = [
-            f"{b['game']}  --  {b['selection']}  --  staked "
-            f"{money_text(b['amount'], self.currency_name)}  --  "
-            f"{'won ' + money_text(b['payout_coins'], self.currency_name) if b['payout_coins'] else 'lost'}"
+            f"{b['game']}  {SEP} {b['selection']}  {SEP} staked "
+            f"{money_text(b['amount'])}  {SEP} "
+            f"{'won ' + money_text(b['payout_coins']) if b['payout_coins'] else 'lost'}"
             for b in bets if b["settled_event"] is not None
         ]
         await interaction.followup.send(
@@ -190,7 +188,7 @@ class CasinoPanelView(discord.ui.View):
     @discord.ui.button(label="Verify a round", style=discord.ButtonStyle.secondary)
     async def verify_pick(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
         rounds = queries.list_recent_rounds(limit=15)
-        options = [(f"{r['game']} -- {r['id']}"[:100], r["id"]) for r in rounds]
+        options = [(f"{r['game']} {SEP} {r['id']}"[:100], r["id"]) for r in rounds]
 
         async def picked(inter: discord.Interaction, round_id: str) -> None:
             if round_id == "_none":

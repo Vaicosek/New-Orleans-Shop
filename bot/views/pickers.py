@@ -30,7 +30,7 @@ class _OwnerGuardedView(discord.ui.View):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.owner_id:
             await interaction.response.send_message(
-                "This picker isn't yours -- open your own with the panel's button.",
+                "This picker isn't yours · open your own with the panel's button.",
                 ephemeral=True,
             )
             return False
@@ -112,7 +112,13 @@ class OptionPickerView(_OwnerGuardedView):
             min_values=1,
             max_values=1,
             options=(
-                [discord.SelectOption(label=label[:100], value=value) for label, value in options]
+                # Both truncated to Discord's 100-char limit -- a label
+                # over the limit just gets cut, but an over-limit VALUE
+                # makes discord.py refuse to build the component at all,
+                # which is how a market with one long outcome name became
+                # unstakeable and unresolvable: the picker never sent.
+                [discord.SelectOption(label=label[:100], value=value[:100])
+                 for label, value in options]
                 or [discord.SelectOption(label="Nothing available", value="_none")]
             ),
             disabled=not options,

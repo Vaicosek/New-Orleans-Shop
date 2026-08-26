@@ -23,7 +23,7 @@ import logging
 import discord
 from discord.ext import commands
 
-from core import db, games
+from core import db, games, pricing
 from core.config import BotConfig, ConfigError, load_bot_config
 
 from .views.alerts import AlertAckView
@@ -126,7 +126,7 @@ class NolaBot(commands.Bot):
         missing = [c for c in COGS if c not in loaded]
         lines.append(f"cogs loaded: {len(loaded)}/{len(COGS)}"
                      + (f"  MISSING: {', '.join(missing)}" if missing else ""))
-        lines.append(f"currency name: {config.currency_name!r}")
+        lines.append(f"currency: {pricing.CURRENCY} (gold ingots, whole numbers)")
         lines.append("=" * 60)
 
         print("\n".join(lines), flush=True)
@@ -137,6 +137,7 @@ def build_bot() -> NolaBot:
         config = load_bot_config()
     except ConfigError as err:
         print(f"FATAL: bad configuration -- {err}", flush=True)
+        print("Set it in the panel's Startup/Variables tab, then restart.", flush=True)
         raise
     try:
         games.configure()
@@ -148,8 +149,20 @@ def build_bot() -> NolaBot:
 
 
 def main() -> None:
+    """Entry point.
+
+    A misconfiguration exits with the one readable FATAL line and NOTHING
+    else. This bot runs on a panel with no shell, so its console output is
+    the only diagnostic there is -- and a Python traceback printed under a
+    clear instruction buries it, which is exactly the moment the person
+    reading needs the instruction most. Real crashes still raise; only the
+    two "you have not configured me yet" cases are caught.
+    """
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    bot = build_bot()
+    try:
+        bot = build_bot()
+    except (ConfigError, games.SeedSecretError):
+        raise SystemExit(1)
     bot.run(bot.nola_config.token, log_handler=None)
 
 

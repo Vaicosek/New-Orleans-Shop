@@ -11,6 +11,15 @@ without a live gateway connection:
     item, order or market id -- "never a text field for an identity"
   - every slash command handler's FIRST statement defers the interaction --
     the 3-second window rule
+  - `OrderCardView.approve_btn` checks staff before it does anything else --
+    it is the only order-approval entry point reachable from a message
+    every member of the server can see
+  - no `discord.ui.TextInput` placeholder echoes a value already shown in
+    that same field's own label -- a "confirmation" the user can just
+    copy-paste isn't one
+  - no user-facing string embeds a raw internal id next to its address code
+    (the `kind:{id}` pattern) -- an address code is the only identity a
+    card is allowed to show
 """
 from __future__ import annotations
 
@@ -144,6 +153,100 @@ check(f"scanned {scanned} discord.ui.TextInput label(s) for identity fields", sc
 check(
     f"no discord.ui.TextInput label asks for a user/item/order/market id ({len(offenders)} offenders)",
     not offenders, "; ".join(offenders),
+)
+
+# ------------------------------------------------------------------ Approve is staff-gated on the card
+# `OrderCardView.approve_btn` sits on a message every member of the guild
+# can see and click -- unlike every ephemeral panel button, there is no
+# `interaction_check` upstream of it to gate on. The staff check has to be
+# the FIRST thing the callback itself does.
+try:
+    from bot.views.orders import OrderCardView
+    approve_source = inspect.getsource(OrderCardView.approve_btn)
+except Exception as err:  # noqa: BLE001
+    approve_source = ""
+    check("OrderCardView.approve_btn source is readable", False, f"{type(err).__name__}: {err}")
+else:
+    check("OrderCardView.approve_btn checks is_staff before doing anything money-related",
+          "is_staff(" in approve_source)
+
+
+# ------------------------------------------------------------------ no placeholder echoes its own label
+def _balanced_call_args(text: str, needle: str) -> list[str]:
+    """Argument text of every `needle(...)` call in `text`, respecting paren
+    nesting -- a naive non-greedy regex stops at the first `)`, which is
+    inside the string for a label like `f"Amount (g, max {X})"` and would
+    silently mis-scope the rest of that call's keyword arguments."""
+    calls = []
+    start = 0
+    while True:
+        idx = text.find(needle, start)
+        if idx == -1:
+            break
+        open_paren = idx + len(needle) - 1
+        if text[open_paren] != "(":
+            start = idx + len(needle)
+            continue
+        depth, j = 0, open_paren
+        while j < len(text):
+            if text[j] == "(":
+                depth += 1
+            elif text[j] == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        calls.append(text[open_paren + 1:j])
+        start = j + 1
+    return calls
+
+
+LABEL_ARG_RE = re.compile(r"label\s*=\s*f?([\"'])(.*?)\1", re.DOTALL)
+PLACEHOLDER_ARG_RE = re.compile(r"placeholder\s*=\s*([A-Za-z_][A-Za-z0-9_.]*)\b")
+BRACE_VAR_RE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_.]*)")
+
+placeholder_offenders: list[str] = []
+for py_file in sorted((ROOT / "bot").rglob("*.py")):
+    text = py_file.read_text(encoding="utf-8")
+    for block in _balanced_call_args(text, "discord.ui.TextInput("):
+        lm = LABEL_ARG_RE.search(block)
+        pm = PLACEHOLDER_ARG_RE.search(block)
+        if not lm or not pm:
+            continue  # placeholder is a literal string or absent -- not an echo
+        label_vars = set(BRACE_VAR_RE.findall(lm.group(2)))
+        if pm.group(1) in label_vars:
+            placeholder_offenders.append(
+                f"{py_file.relative_to(ROOT)}: placeholder={pm.group(1)!r} "
+                f"already appears in label {lm.group(2)!r}"
+            )
+
+check(
+    f"no TextInput placeholder echoes the value its own label already shows "
+    f"({len(placeholder_offenders)} offenders)",
+    not placeholder_offenders, "; ".join(placeholder_offenders),
+)
+
+# ------------------------------------------------------------------ no user-facing internal id pattern
+# The exact shape of the bug this guards: a footer (or any other
+# user-visible string) reading "address vh62  ·  order:1" -- the address
+# code AND the raw database id side by side. `bot.addressing` exists so a
+# card only ever needs to show the code; a literal `kind:{id}` template in
+# source is that pattern leaking back in.
+# No whitespace allowed between the colon and the brace -- that's the
+# exact shape the real bug had ("order:{order_id}"), and it keeps this
+# from tripping over ordinary prose like f"Could not add item: {err}".
+ID_LEAK_RE = re.compile(r"\b(order|item|market)\s*:\{")
+
+id_leak_offenders: list[str] = []
+for py_file in sorted((ROOT / "bot").rglob("*.py")):
+    text = py_file.read_text(encoding="utf-8")
+    for m in ID_LEAK_RE.finditer(text):
+        line_no = text.count("\n", 0, m.start()) + 1
+        id_leak_offenders.append(f"{py_file.relative_to(ROOT)}:{line_no}: {m.group(0)!r}")
+
+check(
+    f"no user-facing string embeds a raw internal id as 'kind:{{id}}' ({len(id_leak_offenders)} offenders)",
+    not id_leak_offenders, "; ".join(id_leak_offenders),
 )
 
 print()

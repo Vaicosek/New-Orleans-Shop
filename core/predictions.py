@@ -58,7 +58,7 @@ from __future__ import annotations
 import sqlite3
 from typing import Optional
 
-from . import money
+from . import audit, money, wagering
 from .db import db_in
 
 SERVICE = "games"
@@ -74,6 +74,14 @@ class UnknownOutcome(MarketError): pass
 class MarketNotOpen(MarketError): pass
 class MarketVoided(MarketError): pass
 class AlreadyResolved(MarketError): pass
+
+
+class WagerRefused(MarketError):
+    """`stake()` was refused by the SAME wagering guard coinflip/dice use --
+    MAX_BET, MAX_DAILY_LOSS, or MIN_ACCOUNT_AGE_DAYS (see core/wagering.py).
+    A MarketError subclass on purpose: bot/views/predict.py already catches
+    `predictions.MarketError` around `stake()` and shows the player the
+    refusal text, so this needs no new handling there."""
 
 
 # ------------------------------------------------------------------ helpers
@@ -120,16 +128,34 @@ def open_market(question: str, outcomes: list[str], *, created_by: str,
 
 def stake(market_id: int, subject: str, outcome_label: str, amount: int, *,
           conn: Optional[sqlite3.Connection] = None) -> int:
-    """Place a hold against `subject` for a position on `outcome_label`."""
+    """Place a hold against `subject` for a position on `outcome_label`.
+
+    Routed through the SAME wagering guard `games.place_bet` uses
+    (`core/wagering.check_wager`) -- MIN_ACCOUNT_AGE_DAYS, MAX_BET,
+    MAX_DAILY_LOSS all apply to a prediction stake exactly as they do to a
+    coinflip bet. `gambling_blocked` is enforced by `money.place_hold`
+    itself (this stake's hold uses service="games", same as casino bets) and
+    is not duplicated here.
+    """
     with db_in(conn) as c:
         market = _market(c, market_id)
         if market["status"] != "open":
             raise MarketNotOpen(f"market {market_id} is {market['status']}, not open")
         outcome_id = _outcome_id(c, market_id, outcome_label)
 
+        try:
+            wagering.check_wager(c, subject, amount, kind="predictions", service=SERVICE)
+        except wagering.WageringError as err:
+            raise WagerRefused(str(err)) from err
+
         hold_id = money.place_hold(
             subject, amount, service=SERVICE,
             reason=f"stake on market {market_id}: {outcome_label}", conn=c,
+        )
+        c.execute(
+            "INSERT INTO gambling_day (subject, day, staked, lost) VALUES (?, ?, ?, 0) "
+            "ON CONFLICT(subject, day) DO UPDATE SET staked = staked + excluded.staked",
+            (subject, wagering.today(), amount),
         )
         cur = c.execute(
             "INSERT INTO pred_stakes (market_id, outcome_id, subject, amount, hold_id) "
@@ -152,10 +178,19 @@ def close(market_id: int, *, conn: Optional[sqlite3.Connection] = None) -> None:
             raise MarketNotOpen(f"market {market_id} could not be closed (not open)")
 
 
-def void(market_id: int, *, conn: Optional[sqlite3.Connection] = None) -> int:
+def void(market_id: int, *, actor: str = "unknown",
+         conn: Optional[sqlite3.Connection] = None) -> int:
     """Release every open hold on the market. Nobody loses money on a voided
     market -- refund, not settlement. Idempotent: re-voiding an already-voided
-    market simply finds nothing left to release."""
+    market simply finds nothing left to release.
+
+    `actor` should be the staff member who voided this market -- pass
+    `money.user(interaction.user.id)` from the caller. Defaults to
+    "unknown" because the current admin panel (bot/views/admin.py's
+    `_VoidConfirmModal`) does not yet capture or forward the resolver's
+    identity; that is a bot/ gap to close, not something this module can fix
+    on its own, so the audit row is honest about not knowing until it does.
+    """
     with db_in(conn) as c:
         market = _market(c, market_id)
         if market["status"] == "resolved":
@@ -167,6 +202,7 @@ def void(market_id: int, *, conn: Optional[sqlite3.Connection] = None) -> int:
         ).fetchall()
 
         released = 0
+        ops: list[dict] = []
         for s in stakes:
             event_id = money.new_event_id("pred.void")
             claim_cur = c.execute(
@@ -177,13 +213,26 @@ def void(market_id: int, *, conn: Optional[sqlite3.Connection] = None) -> int:
             if claim_cur.rowcount != 1:
                 continue
             money.release_hold(s["hold_id"], conn=c)
+            ops.append({
+                "op": "release_hold", "hold_id": s["hold_id"], "subject": s["subject"],
+                "amount": s["amount"], "reverse": None,
+            })
             released += 1
 
         c.execute("UPDATE pred_markets SET status = 'voided' WHERE id = ?", (market_id,))
+
+        if released:
+            audit.record(
+                c, actor=actor, target=f"pred_market:{market_id}",
+                kind="prediction.void",
+                summary=f"voided market {market_id}: refunded {released} stake(s)",
+                ops=ops, money_coins=0, manual_coins=0,
+            )
     return released
 
 
 def resolve(market_id: int, outcome_label: str, event_id: str, *,
+            actor: str = "unknown",
             conn: Optional[sqlite3.Connection] = None) -> dict:
     """Resolve `market_id` to `outcome_label`, keyed on `event_id`.
 
@@ -192,6 +241,14 @@ def resolve(market_id: int, outcome_label: str, event_id: str, *,
     event id on an already-resolved market is a safe replay (returns the
     original summary); calling it again with a DIFFERENT event id is refused
     loudly rather than silently ignored or re-run.
+
+    `actor` should be the staff member who resolved this market -- pass
+    `money.user(interaction.user.id)` from the caller. Defaults to
+    "unknown" because the current admin panel (bot/views/admin.py's
+    `_ResolveConfirmModal`) captures the resolver on `self.resolver` but
+    never forwards it into this call; that is a bot/ gap to close, not
+    something this module can fix on its own, so the audit row is honest
+    about not knowing until it does.
     """
     with db_in(conn) as c:
         market = _market(c, market_id)
@@ -247,7 +304,8 @@ def resolve(market_id: int, outcome_label: str, event_id: str, *,
         # Pass 1: capture EVERY stake (winners and losers alike) into the
         # house first. This is what "the pool" means concretely, and it means
         # paying winners in pass 2 never needs the house to carry a deficit.
-        claimed: list[tuple[str, int, str]] = []
+        claimed: list[tuple[str, int, int, str]] = []
+        ops: list[dict] = []
         for s in stakes:
             is_winner = s["outcome_id"] == winning_outcome_id and winning_pool > 0
             payout = (distributable * s["amount"] // winning_pool) if is_winner else 0
@@ -266,11 +324,21 @@ def resolve(market_id: int, outcome_label: str, event_id: str, *,
                 to=TREASURY, ref_kind="pred_market", ref_id=str(market_id),
                 idem_key=row_event, conn=c,
             )
-            claimed.append((s["subject"], payout, row_event))
+            ops.append({
+                "op": "capture_hold", "hold_id": s["hold_id"], "subject": s["subject"],
+                "amount": s["amount"], "to": TREASURY,
+                "reverse": {"op": "transfer", "src": TREASURY, "dst": s["subject"],
+                            "amount": s["amount"]},
+            })
+            claimed.append((s["subject"], s["amount"], payout, row_event))
 
-        # Pass 2: pay winners pro-rata out of what pass 1 just collected.
+        # Pass 2: pay winners pro-rata out of what pass 1 just collected, and
+        # write each stake's NET result (stake - payout, floored at 0) into
+        # gambling_day -- the same daily-loss ledger core/games.py's bets
+        # use, so a prediction loss counts against MAX_DAILY_LOSS exactly
+        # like a coinflip loss does, instead of staying invisible to it.
         paid_out = 0
-        for subject, payout, row_event in claimed:
+        for subject, staked, payout, row_event in claimed:
             if payout > 0:
                 money.transfer(
                     TREASURY, subject, payout, service=SERVICE,
@@ -279,6 +347,26 @@ def resolve(market_id: int, outcome_label: str, event_id: str, *,
                     idem_key=row_event, conn=c,
                 )
                 paid_out += payout
+                ops.append({
+                    "op": "transfer", "src": TREASURY, "dst": subject, "amount": payout,
+                    "reverse": {"op": "transfer", "src": subject, "dst": TREASURY,
+                                "amount": payout},
+                })
+            net_loss = staked - payout
+            if net_loss > 0:
+                wagering.record_loss(c, subject, net_loss)
+
+        if claimed:
+            audit.record(
+                c, actor=actor, target=f"pred_market:{market_id}",
+                kind="prediction.resolve",
+                summary=(
+                    f"resolved market {market_id} to {outcome_label!r}: pool {pool:,}, "
+                    f"paid {paid_out:,}, rake {rake:,}, remainder {pool - rake - paid_out:,}"
+                ),
+                ops=ops, money_coins=pool + paid_out, manual_coins=0,
+                action_key=f"audit:pred.resolve:{event_id}",
+            )
 
     return {
         "market_id": market_id,

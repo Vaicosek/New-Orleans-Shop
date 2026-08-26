@@ -23,10 +23,10 @@ from __future__ import annotations
 import sqlite3
 from typing import Any, Optional
 
-from . import money
+from . import audit, money
 from .db import db_in
 from .money import normalise_subject
-from .pricing import split_charge
+from .pricing import CURRENCY, split_charge
 
 
 class OrderError(RuntimeError):
@@ -130,6 +130,20 @@ def list_claims(order_id: int, *,
             "SELECT * FROM order_claims WHERE order_id = ? ORDER BY claimed_at", (order_id,)
         ).fetchall()
     return [_row(r) for r in rows]
+
+
+def set_message(order_id: int, channel_id: str, message_id: str, *,
+                conn: Optional[sqlite3.Connection] = None) -> None:
+    """Record which Discord message carries this order's card.
+
+    The card is posted after `create_order` returns, so the ids arrive later.
+    A persistent view re-resolves its subject FROM the message it is on, so
+    without this the channel card can never be refreshed and an already-paid
+    order keeps a live Approve button on it.
+    """
+    with db_in(conn) as c:
+        c.execute("UPDATE orders SET channel_id = ?, message_id = ? WHERE id = ?",
+                  (str(channel_id), str(message_id), int(order_id)))
 
 
 def claim(order_id: int, worker: str, pieces: int, *,
@@ -307,6 +321,7 @@ def approve(order_id: int, approver: str, *,
 
         paid_total = 0
         paid_claims = 0
+        ops: list[dict] = []
         for cl, amount in zip(claims, payouts):
             if amount <= 0:
                 continue                                      # nothing to pay for -- not an error
@@ -318,16 +333,31 @@ def approve(order_id: int, approver: str, *,
             )
             if won.rowcount != 1:
                 continue                                       # a prior approve already paid this
+            worker = normalise_subject(cl["worker"])
             money.transfer(
-                "treasury:shop", normalise_subject(cl["worker"]), amount,
+                "treasury:shop", worker, amount,
                 service="shop", reason=f"order #{order_id} payout",
                 ref_kind="order", ref_id=str(order_id), idem_key=event_id, conn=c,
             )
             paid_total += amount
             paid_claims += 1
+            ops.append({
+                "op": "transfer", "src": "treasury:shop", "dst": worker, "amount": amount,
+                "reverse": {"op": "transfer", "src": worker, "dst": "treasury:shop",
+                            "amount": amount},
+            })
 
         c.execute(
             "UPDATE orders SET status = 'fulfilled', closed_at = datetime('now') WHERE id = ?",
             (order_id,),
+        )
+
+        audit.record(
+            c, actor=approver, target=f"order:{order_id}", kind="order.approve",
+            summary=(
+                f"approved order {order_id}: paid {paid_total:,} {CURRENCY} "
+                f"across {paid_claims} claim(s)"
+            ),
+            ops=ops, money_coins=paid_total, manual_coins=0,
         )
         return {"paid_coins": paid_total, "paid_claims": paid_claims}

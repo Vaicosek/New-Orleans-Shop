@@ -19,6 +19,13 @@ sys.path.insert(0, str(ROOT))
 _tmp = tempfile.mkdtemp(prefix="nola-web-test-")
 os.environ["NOLA_DB_PATH"] = str(Path(_tmp) / "test.db")
 os.environ["NOLA_STAFF_DISCORD_IDS"] = ""
+# Configured so /login and /auth/callback run their real logic (state cookie,
+# state-mismatch guard) instead of the "not configured yet" 503 short-circuit.
+# No real network call is ever made in this file -- every callback test below
+# is rejected by the state check before the Discord HTTP call happens.
+os.environ["NOLA_DISCORD_CLIENT_ID"] = "test-client-id"
+os.environ["NOLA_DISCORD_CLIENT_SECRET"] = "test-client-secret"
+os.environ["NOLA_DISCORD_REDIRECT_URI"] = "http://testserver/auth/callback"
 
 from core import db, catalog                                     # noqa: E402
 
@@ -47,8 +54,83 @@ db.init_db()
 async def main() -> None:
     from aiohttp.test_utils import TestClient, TestServer
 
+    from web import auth
     from web.auth import Identity
     from web.server import create_app
+
+    reset()
+
+    # -- create_session: the REAL path, no identity_provider seam ----------
+    # This is the exact call `web.auth.callback()` makes after a real Discord
+    # handshake. It used to throw: `web_sessions.subject` is a foreign key
+    # into `wallets(subject)`, and a Discord user signing in for the first
+    # time has no wallet row yet, so every real sign-in 500'd. Nothing above
+    # this point exercises that path -- the identity_provider seam installed
+    # below bypasses it entirely -- so this runs before that seam exists.
+    real_token, real_csrf = auth.create_session("777", "Real Session User")
+    with db.db() as c:
+        wallet_row = c.execute(
+            "SELECT 1 FROM wallets WHERE subject = ?", ("u:777",)
+        ).fetchone()
+    check("create_session does not raise for a Discord id with no prior wallet",
+          True)
+    check("create_session ensures the wallet row its FK requires",
+          wallet_row is not None)
+
+    real_app = create_app()
+    async with TestClient(TestServer(real_app)) as real_client:
+        r = await real_client.get("/me", cookies={auth.COOKIE_NAME: real_token})
+        check("a real session cookie resolves through resolve_identity's actual "
+              "cookie/session-row branch and /me answers 200", r.status == 200)
+        text = await r.text()
+        check("the real session's name renders on the page",
+              "Real Session User" in text)
+
+        # -- logout: the session's own csrf token is actually checked -------
+        r = await real_client.get(f"/logout?csrf={real_csrf}",
+                                   cookies={auth.COOKIE_NAME: real_token},
+                                   allow_redirects=False)
+        check("logout with the correct csrf token is accepted",
+              r.status in (302, 303))
+        with db.db() as c:
+            row = c.execute(
+                "SELECT 1 FROM web_sessions WHERE token = ?", (real_token,)
+            ).fetchone()
+        check("a correct-csrf logout actually destroys the session row",
+              row is None)
+
+        tok2, csrf2 = auth.create_session("778", "Second Real User")
+        r = await real_client.get("/logout?csrf=not-the-real-token",
+                                   cookies={auth.COOKIE_NAME: tok2},
+                                   allow_redirects=False)
+        check("logout with the wrong csrf token is refused", r.status == 403)
+        with db.db() as c:
+            row = c.execute(
+                "SELECT 1 FROM web_sessions WHERE token = ?", (tok2,)
+            ).fetchone()
+        check("a refused logout leaves the session intact", row is not None)
+
+    # -- OAuth2 state: minted at /login, required at /auth/callback ---------
+    async with TestClient(TestServer(create_app())) as oauth_client:
+        r = await oauth_client.get("/login", allow_redirects=False)
+        check("/login redirects to Discord's authorize endpoint",
+              r.status in (302, 303)
+              and "discord.com" in r.headers.get("Location", ""))
+        check("/login's redirect carries a state parameter",
+              "state=" in r.headers.get("Location", ""))
+        login_state = r.cookies.get(auth.STATE_COOKIE_NAME)
+        check("/login sets a state cookie", login_state is not None)
+
+        r = await oauth_client.get("/auth/callback?code=abc")
+        check("/auth/callback rejects a callback with no state at all",
+              r.status == 400)
+
+        r = await oauth_client.get(
+            "/auth/callback?code=abc&state=not-the-real-state",
+            cookies={auth.STATE_COOKIE_NAME: "the-real-state"},
+        )
+        check("/auth/callback rejects a state that doesn't match its cookie",
+              r.status == 400)
 
     reset()
     app = create_app()

@@ -16,14 +16,12 @@ class CasinoCog(commands.Cog):
     @app_commands.command(name="casino", description="Coinflip and dice, provably fair.")
     async def casino(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
-        config = getattr(self.bot, "nola_config", None)
-        currency_name = config.currency_name if config else "coin"
         embed = panel_embed(
             "Casino",
-            "Coinflip and dice. Every round is provably fair -- verify any past round below.",
+            "Coinflip and dice. Every round is provably fair · verify any past round below.",
         )
         await interaction.followup.send(
-            embed=embed, view=CasinoPanelView(interaction.user.id, currency_name), ephemeral=True
+            embed=embed, view=CasinoPanelView(interaction.user.id), ephemeral=True
         )
 
 

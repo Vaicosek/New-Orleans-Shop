@@ -17,11 +17,13 @@ from core import alerts, catalog
 from .. import addressing
 from ..ui.embed import panel_embed
 
-_ITEM_MARK = re.compile(r"item:(\d+)")
+_ADDRESS_MARK = re.compile(r"address (\S+)")
 
 
 def _alert_footer(item_id: int, code: str) -> str:
-    return f"address {code}  ·  item:{item_id}"
+    # The code alone -- never the raw item id next to it (see
+    # bot/views/orders.py's `_order_footer` for the same fix and why).
+    return f"address {code}"
 
 
 def parse_item_id(message: discord.Message | None) -> int | None:
@@ -31,8 +33,16 @@ def parse_item_id(message: discord.Message | None) -> int | None:
     text = getattr(footer, "text", None)
     if not text:
         return None
-    m = _ITEM_MARK.search(text)
-    return int(m.group(1)) if m else None
+    m = _ADDRESS_MARK.search(text)
+    if not m:
+        return None
+    found = addressing.resolve(m.group(1))
+    if found is None or found[0] != "item":
+        return None
+    try:
+        return int(found[1])
+    except (TypeError, ValueError):
+        return None
 
 
 def build_alert_embed(due_row: dict) -> discord.Embed:

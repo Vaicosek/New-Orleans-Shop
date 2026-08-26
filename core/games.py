@@ -47,6 +47,11 @@ A bet is a hold at placement (`place_bet`), never a debit. `gambling_blocked`
 is enforced by `money.place_hold` at that moment; this module does not (and
 must not) re-check the flag itself.
 
+Before a bet is even accepted, `place_bet` checks that `treasury:games`
+could fund the BEST case for the player (see `_treasury_capacity` /
+`HouseInsolvent`) -- refusing up front, with a clear reason, is what keeps
+the house from ever having to decide a win it cannot pay.
+
 On settlement (`settle_round`):
   - lose: the hold is captured in full to `treasury:games`.
   - win:  the hold is released (the player's own stake was never anyone
@@ -54,9 +59,19 @@ On settlement (`settle_round`):
           *profit* (payout - stake) is transferred from `treasury:games` to
           the player. `treasury:games` has TRANSFER and HOLD scope only --
           no MINT -- so a bug here can misallocate the house's bankroll and
-          can never conjure new coins. If the house is undercapitalised for a
-          payout it fails loudly (`InsufficientFunds` once past its deficit
-          floor), never silently.
+          can never conjure new coins.
+
+          If the treasury still runs dry between the check above and this
+          transfer (concurrent bets can do that even though each one passed
+          its own pre-check), the round is NEVER rolled back for it: an
+          unpayable win must never be reported to the player as a failed
+          bet, and `game_rounds`/`game_bets` must never be destroyed just
+          because the house's cash position moved. Instead the profit is
+          recorded as a debt -- one `audit_actions` row with `manual_coins`
+          set to what is owed and `reversed_at` NULL until a human pays it
+          by hand (`audit.pending_debts()` lists every one outstanding) --
+          and the round settles normally otherwise. The player's stake is
+          still returned in full either way.
 
 Settlement is idempotent per bet: `game_bets.settled_event` is UNIQUE and is
 set in the very statement that decides the payout amount, guarded by
@@ -74,7 +89,8 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from . import money
+from . import audit, money, wagering
+from .pricing import CURRENCY
 from .db import db, db_in
 
 SERVICE = "games"
@@ -82,10 +98,15 @@ TREASURY = money.SERVICE_TREASURY[SERVICE]  # "treasury:games"
 
 # ------------------------------------------------------------------ config
 # Explicit numbers. Never derive a limit or an edge from the payout maths.
+#
+# These three are re-exported from core/wagering.py, the ONE guard shared
+# with core/predictions.py -- keep importing them from here (games.MAX_BET
+# etc. is the public name bot/views/casino.py and the tests use), just don't
+# redefine them here, or the two modules drift again.
 
-MAX_BET = 5_000
-MAX_DAILY_LOSS = 20_000
-MIN_ACCOUNT_AGE_DAYS = 3
+MAX_BET = wagering.MAX_BET
+MAX_DAILY_LOSS = wagering.MAX_DAILY_LOSS
+MIN_ACCOUNT_AGE_DAYS = wagering.MIN_ACCOUNT_AGE_DAYS
 
 GAME_CONFIG: dict[str, dict[str, Any]] = {
     "coinflip": {
@@ -116,6 +137,15 @@ class DailyLossExceeded(GameError): pass
 class AccountTooNew(GameError): pass
 
 
+class HouseInsolvent(GameError):
+    """`treasury:games` cannot currently fund a win on this bet even in the
+    best case. Refused BEFORE the hold is placed -- a bet that could not be
+    paid if it won must never be accepted in the first place. (A win that
+    slips past this and still can't be funded at settlement -- because the
+    treasury moved between placing the bet and settling the round -- is not
+    an error either: see `settle_round`'s pending-payout path.)"""
+
+
 class SeedSecretError(RuntimeError):
     """NOLA_GAME_SEED_SECRET is missing, is still the shipped placeholder, or
     is too short to carry real entropy.
@@ -136,19 +166,18 @@ def _today() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
-def _account_age_days(conn: sqlite3.Connection, subject: str) -> int:
-    """Age of `subject`'s wallet row, in whole days. A subject with no wallet
-    yet is treated as brand new (age 0) -- MIN_ACCOUNT_AGE_DAYS is meant to
-    gate first contact with the economy, not just first contact with games."""
-    row = conn.execute(
-        "SELECT created_at FROM wallets WHERE subject = ?", (subject,)
+def _treasury_capacity(c: sqlite3.Connection) -> int:
+    """How many more coins `treasury:games` could pay out right now without
+    a `money.InsufficientFunds` -- its available balance plus how far its
+    deficit floor still lets it go negative. Ensures the wallet exists first
+    (it may not, this early -- `bootstrap_treasuries` runs at boot, but a
+    test or a fresh DB may call this before that has happened)."""
+    money.ensure_wallet(TREASURY, conn=c)
+    bal = money.balance(TREASURY, conn=c)
+    floor_row = c.execute(
+        "SELECT deficit_floor FROM wallets WHERE subject = ?", (TREASURY,)
     ).fetchone()
-    if row is None:
-        return 0
-    created = datetime.strptime(row["created_at"], "%Y-%m-%d %H:%M:%S").replace(
-        tzinfo=timezone.utc
-    )
-    return (datetime.now(timezone.utc) - created).days
+    return bal.available + int(floor_row["deficit_floor"])
 
 
 _INSECURE_DEFAULT_SECRET = "dev-insecure-seed-secret-change-me"
@@ -279,40 +308,37 @@ def place_bet(round_id: str, subject: str, selection: str, amount: int, *,
         if amount > MAX_BET:
             raise BetTooLarge(f"{amount:,} exceeds MAX_BET {MAX_BET:,}")
 
-        if _account_age_days(c, subject) < MIN_ACCOUNT_AGE_DAYS:
-            raise AccountTooNew(
-                f"{subject}'s wallet is younger than MIN_ACCOUNT_AGE_DAYS={MIN_ACCOUNT_AGE_DAYS}"
+        # Solvency, checked BEFORE the bet is accepted at all: refuse a bet
+        # up front, with a clear reason, if the house could not fund it even
+        # in the best case for the player. Refusing here is what stops an
+        # unpayable win from ever being decided in the first place -- see
+        # settle_round's pending-payout path for the (rarer, concurrent-bet)
+        # case where the treasury still runs dry between this check and
+        # settlement despite passing here.
+        profit_if_win = (amount * cfg["payout_bps"]) // 10_000 - amount
+        if profit_if_win > 0 and _treasury_capacity(c) < profit_if_win:
+            raise HouseInsolvent(
+                f"the house cannot currently fund a win on this {amount:,} {CURRENCY} "
+                f"{game} bet (would owe {profit_if_win:,} more on top of the "
+                f"stake back); try a smaller amount or again later"
             )
 
+        # MIN_ACCOUNT_AGE_DAYS, MAX_DAILY_LOSS (realized loss from
+        # gambling_day PLUS this subject's currently-open games exposure) --
+        # the ONE guard shared with predictions.stake(). Re-raised as this
+        # module's own exception classes so callers (bot/views/casino.py,
+        # tests) keep seeing games.BetTooLarge/DailyLossExceeded/AccountTooNew
+        # exactly as before; only the check itself moved.
+        try:
+            wagering.check_wager(c, subject, amount, kind="games", service=SERVICE)
+        except wagering.AccountTooNew as err:
+            raise AccountTooNew(str(err)) from err
+        except wagering.BetTooLarge as err:
+            raise BetTooLarge(str(err)) from err
+        except wagering.DailyLossExceeded as err:
+            raise DailyLossExceeded(str(err)) from err
+
         today = _today()
-        loss_row = c.execute(
-            "SELECT lost FROM gambling_day WHERE subject = ? AND day = ?", (subject, today)
-        ).fetchone()
-        lost_so_far = int(loss_row["lost"]) if loss_row else 0
-        # gambling_day.lost only grows at settle_round time. Without also
-        # counting what is currently at risk in this subject's OPEN games
-        # holds, a player can open many rounds and bet up to MAX_BET in each
-        # before settling any of them -- none of it visible to the cap until
-        # it is too late. This read and the hold INSERT below run inside the
-        # SAME transaction (db.db()'s BEGIN IMMEDIATE), which is a single
-        # SQLite writer lock: a concurrent place_bet() for the same subject
-        # cannot read this same "before" exposure and also slip its hold in
-        # underneath this one, it simply waits for this transaction to
-        # commit (or roll back) and then reads the updated total.
-        exposure_row = c.execute(
-            "SELECT COALESCE(SUM(amount - captured - released), 0) AS exposure "
-            "FROM ledger_holds WHERE subject = ? AND service = ? AND state = 'open'",
-            (subject, SERVICE),
-        ).fetchone()
-        open_exposure = int(exposure_row["exposure"])
-        at_risk = lost_so_far + open_exposure + amount
-        if at_risk > MAX_DAILY_LOSS:
-            raise DailyLossExceeded(
-                f"{subject} would have {at_risk:,} at risk today "
-                f"({lost_so_far:,} already realized + {open_exposure:,} in "
-                f"other open bets + {amount:,} this bet); MAX_DAILY_LOSS is "
-                f"{MAX_DAILY_LOSS:,}"
-            )
 
         # Placing the hold is the money-committing step; it validates funds,
         # freeze state and gambling_blocked all in one WHERE clause.
@@ -425,7 +451,9 @@ def settle_round(round_id: str, *, conn: Optional[sqlite3.Connection] = None) ->
         ).fetchall()
 
         results = []
-        today = _today()
+        moved_coins = 0      # moved automatically by this call (captures + paid profit)
+        pending_coins = 0    # profit decided but not automatically payable -- a debt
+        ops: list[dict] = []
         for bet in bets:
             win = _wins(game, bet["selection"], outcome)
             payout_total = (bet["amount"] * cfg["payout_bps"]) // 10_000 if win else 0
@@ -439,18 +467,44 @@ def settle_round(round_id: str, *, conn: Optional[sqlite3.Connection] = None) ->
             if claim_cur.rowcount != 1:
                 continue  # a previous call already settled this bet
 
+            payout_pending = False
             if win:
                 money.release_hold(bet["hold_id"], conn=c)
                 profit = payout_total - bet["amount"]
                 if profit < 0:
                     raise GameError(f"{game} configured to pay below stake on a win")
                 if profit > 0:
-                    money.transfer(
-                        TREASURY, bet["subject"], profit, service=SERVICE,
-                        reason=f"{game} win, round {round_id}",
-                        ref_kind="game_round", ref_id=round_id,
-                        idem_key=event_id, conn=c,
-                    )
+                    try:
+                        money.transfer(
+                            TREASURY, bet["subject"], profit, service=SERVICE,
+                            reason=f"{game} win, round {round_id}",
+                            ref_kind="game_round", ref_id=round_id,
+                            idem_key=event_id, conn=c,
+                        )
+                    except money.InsufficientFunds:
+                        # The house cannot fund this win RIGHT NOW -- almost
+                        # always a concurrent bet draining the treasury
+                        # between place_bet's own pre-check and this moment.
+                        # The round and this bet are NOT rolled back for it:
+                        # the player won, the round is real and verifiable,
+                        # and what is owed becomes a visible debt (see
+                        # core/audit.py) rather than a vanished round.
+                        payout_pending = True
+                        pending_coins += profit
+                        ops.append({
+                            "op": "debt", "owed_to": bet["subject"], "amount": profit,
+                            "reason": f"{game} win, round {round_id}: treasury:games "
+                                      "could not fund this automatically",
+                            "reverse": None,
+                        })
+                    else:
+                        moved_coins += profit
+                        ops.append({
+                            "op": "transfer", "src": TREASURY, "dst": bet["subject"],
+                            "amount": profit,
+                            "reverse": {"op": "transfer", "src": bet["subject"],
+                                        "dst": TREASURY, "amount": profit},
+                        })
                 loss_amount = 0
             else:
                 money.capture_hold(
@@ -458,19 +512,39 @@ def settle_round(round_id: str, *, conn: Optional[sqlite3.Connection] = None) ->
                     to=TREASURY, ref_kind="game_round", ref_id=round_id,
                     idem_key=event_id, conn=c,
                 )
+                moved_coins += bet["amount"]
+                ops.append({
+                    "op": "capture_hold", "hold_id": bet["hold_id"], "subject": bet["subject"],
+                    "amount": bet["amount"], "to": TREASURY,
+                    "reverse": {"op": "transfer", "src": TREASURY, "dst": bet["subject"],
+                                "amount": bet["amount"]},
+                })
                 loss_amount = bet["amount"]
 
             if loss_amount:
-                c.execute(
-                    "INSERT INTO gambling_day (subject, day, staked, lost) VALUES (?, ?, 0, ?) "
-                    "ON CONFLICT(subject, day) DO UPDATE SET lost = lost + excluded.lost",
-                    (bet["subject"], today, loss_amount),
-                )
+                wagering.record_loss(c, bet["subject"], loss_amount)
 
             results.append({
                 "bet_id": bet["id"], "subject": bet["subject"], "selection": bet["selection"],
-                "win": win, "payout": payout_total,
+                "win": win, "payout": payout_total, "payout_pending": payout_pending,
             })
+
+        if results:
+            # One audit row per settle_round call that actually claimed
+            # work -- a replay that finds nothing left to settle writes
+            # nothing, matching the "one row per action" rule without
+            # needing a dedup key: two calls can never claim the same bet.
+            audit.record(
+                c, actor="system:games", target=f"game_round:{round_id}",
+                kind="game.settle",
+                summary=(
+                    f"{game} round {round_id}: settled {len(results)} bet(s), "
+                    f"moved {moved_coins:,} {CURRENCY} automatically"
+                    + (f", {pending_coins:,} {CURRENCY} owed as a pending payout"
+                       if pending_coins else "")
+                ),
+                ops=ops, money_coins=moved_coins, manual_coins=pending_coins,
+            )
 
     return {"round_id": round_id, "game": row["game"], "outcome": outcome, "results": results}
 

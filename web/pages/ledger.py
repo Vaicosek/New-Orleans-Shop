@@ -1,4 +1,4 @@
-"""`/ledger` -- staff only. Balances, orders, payouts, the audit trail.
+"""`/ledger` -- staff only. Balances, orders, order settlements, the audit trail.
 
 Anonymous visitors get 401; a signed-in non-staff visitor gets 403. Staff is
 checked here, at the route, against the identity `auth.resolve_identity()`
@@ -37,7 +37,7 @@ def _open_orders() -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def _payouts() -> list[dict]:
+def _order_settlements() -> list[dict]:
     rows = connection().execute(
         "SELECT ts, subject, delta, reason FROM ledger_entries "
         " WHERE ref_kind = 'order' ORDER BY id DESC LIMIT 50"
@@ -87,10 +87,10 @@ async def ledger(request: web.Request) -> web.Response:
         f'<td class="num">{esc(price_label(o["price_coins"], o["price_unit_pieces"], o["stack_size"]))}</td></tr>'
         for o in _open_orders()
     ]
-    payout_rows = [
+    settlement_rows = [
         f'<tr><td>{esc(p["ts"])}</td><td>{esc(p["subject"])}</td>'
         f'<td class="num">{p["delta"]:+,}</td><td>{esc(p["reason"])}</td></tr>'
-        for p in _payouts()
+        for p in _order_settlements()
     ]
     audit_rows = [
         f'<tr><td>{esc(a["ts"])}</td><td>{esc(a["actor"])}</td>'
@@ -130,7 +130,7 @@ async def ledger(request: web.Request) -> web.Response:
 
     body = f"""
 <h1>Ledger</h1>
-<p>Internal. Balances, orders, payouts, and the audit trail.</p>
+<p>Internal. Balances, orders, order settlements, and the audit trail.</p>
 <h2>Catalog by category</h2>
 <p>Every declared category, including planned ones with nothing stocked yet.</p>
 {catalog_table}
@@ -139,8 +139,8 @@ async def ledger(request: web.Request) -> web.Response:
 <h2>Open orders</h2>
 {_table(["Order", "Item", "Requested", "Produced", "Status", "Price"], {2, 3, 5},
         order_rows, "No open orders.")}
-<h2>Payouts</h2>
-{_table(["When", "Subject", "Amount", "Reason"], {2}, payout_rows, "No payouts yet.")}
+<h2>Order settlements</h2>
+{_table(["When", "Subject", "Amount", "Reason"], {2}, settlement_rows, "No settlements yet.")}
 <h2>Audit trail</h2>
 {_table(["When", "Actor", "Kind", "Summary", "Coins"], {4}, audit_rows, "No audit entries yet.")}
 """

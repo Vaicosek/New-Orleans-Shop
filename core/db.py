@@ -72,18 +72,39 @@ def db_in(conn: Optional[sqlite3.Connection] = None) -> Iterator[sqlite3.Connect
 
 
 def init_db(conn: Optional[sqlite3.Connection] = None) -> None:
-    """Apply the schema. Idempotent — every statement is CREATE ... IF NOT EXISTS."""
+    """Apply the schema (idempotent) and bring up the fixed treasury wallets.
+
+    This is the ONE shared boot path both entrypoints call before doing
+    anything else -- `run_shop.py` via `bot.main.main()`, `run_web.py`
+    directly -- which makes it also the one place that can guarantee
+    `treasury:shop` / `treasury:games` / `treasury:house` exist, with their
+    deficit floors, before a single order, bet or stake can ever be placed
+    against them. Previously nothing called `money.bootstrap_treasuries` at
+    all, so those wallets only ever came into being lazily (auto-vivified at
+    floor 0 by the first `ensure_wallet` an unrelated transfer happened to
+    trigger) -- ordering that a boot path must not leave to chance.
+
+    `bootstrap_treasuries` is exactly as idempotent as the rest of this
+    function: it only ever inserts a missing wallet or (re-)applies a floor,
+    never touches a balance, so calling it on every boot (including inside a
+    test's own `db.init_db()`) is safe.
+    """
     sql = SCHEMA_PATH.read_text(encoding="utf-8")
     target = conn if conn is not None else connection()
     target.executescript(sql)
     _migrate(target)
+    from . import money  # local import: money imports back from this module
+    money.bootstrap_treasuries(conn=target)
 
 
 # Migrations are content-probed and idempotent rather than version-numbered.
 # Each entry says WHY it exists — there is no schema_version table to anchor an
 # external changelog to, so the reason has to live next to the statement.
 _MIGRATIONS: list[str] = [
-    # (none yet — the schema is new. Append ALTER TABLE statements here.)
+    # audit_actions grew a `target` column (who/what an action was done to)
+    # after shipping without one -- CONTRACT.md sec 4 promises "who did it",
+    # which is meaningless without also saying to whom.
+    "ALTER TABLE audit_actions ADD COLUMN target TEXT NOT NULL DEFAULT ''",
 ]
 
 

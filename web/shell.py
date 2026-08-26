@@ -44,8 +44,9 @@ def _nav_html(nav_key: str, identity: Optional[Identity]) -> str:
 def _who_html(identity: Optional[Identity]) -> str:
     if identity is None:
         return '<a class="navlink" href="/login">Sign in with Discord</a>'
+    logout_href = f"/logout?csrf={esc(identity.csrf)}"
     return (f'<span class="who">{esc(identity.name)}</span>'
-            f'<a class="navlink" href="/logout">Sign out</a>')
+            f'<a class="navlink" href="{logout_href}">Sign out</a>')
 
 
 def page(title: str, nav_key: str, body: str, *,
