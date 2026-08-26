@@ -72,6 +72,9 @@ class BotConfig:
     alerts_channel_id: int
     staff_role_ids: tuple[int, ...]
     manager_role_ids: tuple[int, ...]
+    # Discord USER ids, not roles. Minting creates money out of nothing,
+    # so it is deliberately not delegable to a role someone can be given.
+    owner_discord_ids: tuple[int, ...]
     command_sync_guild_only: bool
 
     def guild_channel_ids(self) -> dict[str, int]:
@@ -94,5 +97,6 @@ def load_bot_config() -> BotConfig:
         alerts_channel_id=env_int("ALERTS_CHANNEL_ID", required=True),
         staff_role_ids=env_ids("STAFF_ROLE_IDS"),
         manager_role_ids=env_ids("MANAGER_ROLE_IDS"),
+        owner_discord_ids=env_ids("OWNER_DISCORD_IDS"),
         command_sync_guild_only=env_bool("COMMAND_SYNC_GUILD_ONLY", default=True),
     )

@@ -28,3 +28,13 @@ def is_manager(member: discord.abc.User | discord.Member, config: BotConfig) -> 
     if not config.manager_role_ids:
         return False
     return bool(_role_ids(member) & set(config.manager_role_ids)) or is_staff(member, config)
+
+
+def is_owner(member: discord.abc.User | discord.Member, config: BotConfig) -> bool:
+    """Owners only: funding a treasury creates coins that did not exist.
+
+    Checked against a USER id list rather than a role, because a role can be
+    granted by anyone who can manage roles -- which would make "who may mint"
+    a Discord permissions question instead of an explicit list.
+    """
+    return int(getattr(member, "id", 0)) in set(config.owner_discord_ids)

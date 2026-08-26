@@ -10,11 +10,12 @@ from __future__ import annotations
 
 import discord
 
-from core import alerts, catalog, money, predictions
+from core import alerts, audit, catalog, db, money, predictions, pricing
 
 from .. import addressing
 
 from . import pickers
+from .. import permissions
 from ..permissions import is_staff
 from ..ui.embed import money_text, panel_embed, price_line, rows
 from .. import queries
@@ -63,12 +64,102 @@ def build_admin_embed(config) -> discord.Embed:
 
 
 def build_treasury_embed() -> discord.Embed:
-    subjects = ["treasury:shop", "treasury:games", "treasury:house"]
+    """Balances by their real names. `treasury:shop` is plumbing and never
+    appears in a surface a person reads."""
     lines = []
-    for s in subjects:
-        bal = money.balance(s)
-        lines.append(f"{s}: {money_text(bal.coins)}  ({money_text(bal.held)} held)")
+    for subject, label in money.TREASURY_NAMES.items():
+        bal = money.balance(subject)
+        held = f"  ({money_text(bal.held)} held)" if bal.held else ""
+        lines.append(f"{label}: {money_text(bal.coins)}{held}")
     return panel_embed("Treasury", rows(lines))
+
+
+class _FundAmountModal(discord.ui.Modal):
+    """Free text, because an amount IS free text -- a picker cannot offer
+    every number. The treasury itself was chosen from a Select first."""
+
+    def __init__(self, subject: str, funder: str):
+        super().__init__(title=f"Fund {money.TREASURY_NAMES[subject]}"[:45], timeout=300)
+        self.subject, self.funder = subject, funder
+        self.amount = discord.ui.TextInput(
+            label=f"How much {pricing.CURRENCY} to add?", placeholder="e.g. 50000",
+            max_length=15)
+        self.add_item(self.amount)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        raw = str(self.amount.value).strip().replace(",", "").replace(" ", "")
+        if not raw.isdigit() or int(raw) <= 0:
+            await interaction.followup.send(
+                "Amount must be a positive whole number.", ephemeral=True)
+            return
+        amount = int(raw)
+        label = money.TREASURY_NAMES[self.subject]
+        before = money.balance(self.subject).coins
+        # Preview with the real figures. He confirms numbers, not intentions.
+        await interaction.followup.send(
+            f"Funding {label}\n"
+            f"Now: {money_text(before)}\n"
+            f"Adding: {money_text(amount)}\n"
+            f"After: {money_text(before + amount)}\n\n"
+            f"This creates {money_text(amount)} that did not exist before. "
+            f"Type the treasury's name to confirm.",
+            view=_FundGate(self.subject, amount, self.funder),
+            ephemeral=True,
+        )
+
+
+class _FundConfirmModal(discord.ui.Modal):
+    """Typed confirmation, and the typed string is the treasury's NAME.
+
+    The name is shown on the preview above, so this is an attention gate
+    rather than a secret -- which is the honest thing for it to be. What it
+    is not is a placeholder pre-filled with the answer.
+    """
+
+    def __init__(self, subject: str, amount: int, funder: str):
+        super().__init__(title="Confirm funding", timeout=300)
+        self.subject, self.amount, self.funder = subject, amount, funder
+        self.confirm = discord.ui.TextInput(
+            label=f"Type: {money.TREASURY_NAMES[subject]}", max_length=40)
+        self.add_item(self.confirm)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        label = money.TREASURY_NAMES[self.subject]
+        if str(self.confirm.value).strip().casefold() != label.casefold():
+            await interaction.followup.send("Name did not match. Nothing was funded.",
+                                            ephemeral=True)
+            return
+        try:
+            with db.db() as c:
+                after = money.mint(self.subject, self.amount, service="owner",
+                                   reason=f"treasury funding by {self.funder}",
+                                   ref_kind="treasury", ref_id=self.subject, conn=c)
+                audit.record(
+                    c, actor=self.funder, target=self.subject, kind="treasury.fund",
+                    summary=f"funded {label} with {self.amount:,} {pricing.CURRENCY}",
+                    money_coins=self.amount,
+                    ops=[{"op": "transfer", "from": self.subject,
+                          "to": "treasury:house", "amount": self.amount,
+                          "note": "reverse of a mint: move it out, it cannot be un-created"}],
+                )
+        except money.MoneyError as err:
+            await interaction.followup.send(f"Could not fund {label}: {err}", ephemeral=True)
+            return
+        await interaction.followup.send(
+            f"{label} funded. New balance {money_text(after)}.", ephemeral=True)
+
+
+class _FundGate(discord.ui.View):
+    def __init__(self, subject: str, amount: int, funder: str) -> None:
+        super().__init__(timeout=120)
+        self.subject, self.amount, self.funder = subject, amount, funder
+
+    @discord.ui.button(label="Confirm funding", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        await interaction.response.send_modal(
+            _FundConfirmModal(self.subject, self.amount, self.funder))
 
 
 class _AddItemModal(discord.ui.Modal, title="Add item"):
@@ -364,6 +455,27 @@ class AdminPanelView(_StaffGatedView):
     async def treasury(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
         await interaction.response.defer(ephemeral=True)
         await interaction.followup.send(embed=build_treasury_embed(), ephemeral=True)
+
+    @discord.ui.button(label="Fund treasury", style=discord.ButtonStyle.danger, row=2)
+    async def fund(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        """Owner-only. Without this nothing can put gold into the system and
+        every payout fails with an empty treasury."""
+        config = getattr(interaction.client, "nola_config", None)
+        if config is None or not permissions.is_owner(interaction.user, config):
+            await interaction.response.send_message(
+                "Owners only.", ephemeral=True)
+            return
+        funder = money.user(interaction.user.id)
+        options = [(label, subject) for subject, label in money.TREASURY_NAMES.items()]
+
+        async def picked(inter: discord.Interaction, subject: str) -> None:
+            await inter.response.send_modal(_FundAmountModal(subject, funder))
+
+        await interaction.response.send_message(
+            "Which treasury?",
+            view=pickers.OptionPickerView(self.owner_id, options, picked),
+            ephemeral=True,
+        )
 
 
 class _ResolveGate(discord.ui.View):

@@ -24,13 +24,50 @@ SCHEMA_PATH = Path(__file__).resolve().parent / "schema.sql"
 _local = threading.local()
 
 
-def _connect() -> sqlite3.Connection:
+def _open() -> sqlite3.Connection:
     conn = sqlite3.connect(str(DB_PATH), check_same_thread=False, isolation_level=None)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
+    return conn
+
+
+def _connect() -> sqlite3.Connection:
+    conn = _open()
+    if not _try_journal_mode(conn, "WAL"):
+        # The failed PRAGMA leaves the connection unusable for the rest of
+        # this session -- a later write still raises "disk I/O error" even
+        # though the mode was never actually changed. Reopen rather than
+        # carry the damaged handle forward; reusing it is what made this
+        # look like a schema bug instead of a filesystem one.
+        conn.close()
+        print(f"[db] WAL unavailable under {DB_PATH.parent}; using TRUNCATE journalling. "
+              f"Expected on a mounted or network folder, NOT expected in production.",
+              flush=True)
+        conn = _open()
+        if not _try_journal_mode(conn, "TRUNCATE"):
+            conn.close()
+            raise RuntimeError(
+                f"{DB_PATH} is on a filesystem that supports neither WAL nor TRUNCATE "
+                f"journalling. SQLite cannot run here -- put the database somewhere else "
+                f"with NOLA_DB_PATH."
+            )
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA busy_timeout=5000")
     return conn
+
+
+def _try_journal_mode(conn: sqlite3.Connection, mode: str) -> bool:
+    """Ask for a journal mode. True if the database actually took it.
+
+    Returns rather than raises, and CHECKS the value back: SQLite answers a
+    journal_mode request with the mode now in force, which is not always the
+    one asked for. Trusting the request instead of the answer is how a
+    database ends up running in a durability mode nobody chose.
+    """
+    try:
+        got = conn.execute(f"PRAGMA journal_mode={mode}").fetchone()[0]
+    except sqlite3.OperationalError:
+        return False
+    return str(got).lower() == mode.lower()
 
 
 def connection() -> sqlite3.Connection:

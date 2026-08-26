@@ -46,6 +46,15 @@ SERVICE_TREASURY: dict[str, str] = {
     "owner": "treasury:house",
 }
 
+# What a human calls each treasury. Internal ids never appear in a surface a
+# person looks at -- "treasury:shop" is plumbing, "Shop float" is the thing.
+TREASURY_NAMES: dict[str, str] = {
+    "treasury:shop": "Shop float",
+    "treasury:games": "House bank",
+    "treasury:house": "Owner reserve",
+}
+
+
 # Services whose holds are wagers, and so must respect the self-exclusion flag.
 GAMBLING_SERVICES = frozenset({"games"})
 

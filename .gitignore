@@ -187,6 +187,8 @@ neworleans.db
 *.db
 *.db-wal
 *.db-shm
+# TRUNCATE journalling writes this one; WAL does not, so it was missed.
+*.db-journal
 
 # Files parked for deletion. device_bash cannot rm, so anything being removed
 # lands here first -- it must never reach a commit.
