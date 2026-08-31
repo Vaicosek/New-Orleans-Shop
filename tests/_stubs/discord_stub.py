@@ -28,6 +28,11 @@ def install() -> None:
         secondary = 2
         success = 3
         danger = 4
+        # A link button has no callback -- Discord opens the URL itself. The
+        # stub carries it because bot/views/shop.py uses one, and a stub that
+        # is missing a member the real library has turns a working panel into
+        # a test-only AttributeError.
+        link = 5
 
     class Embed:
         def __init__(self, title: str = "", description: str = "", color=None):

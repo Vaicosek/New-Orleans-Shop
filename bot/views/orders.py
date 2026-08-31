@@ -64,7 +64,7 @@ def parse_order_id(message: discord.Message | None) -> int | None:
 def build_order_embed(order_id: int) -> discord.Embed:
     order = queries.get_order_detail(order_id)
     if order is None:
-        return panel_embed("Order not found", "This order no longer exists.")
+        return panel_embed("Order not found", "This order no longer exists.", tone="loss")
     claims = orders_core.list_claims(order_id)
     label = price_label(order["price_coins"], order["price_unit_pieces"], order["stack_size"])
     claim_lines = [
@@ -252,7 +252,7 @@ class OrderCardView(discord.ui.View):
             _PiecesModal("Pieces delivered", order_id, money.user(interaction.user.id), "deliver")
         )
 
-    @discord.ui.button(label="Approve", style=discord.ButtonStyle.danger,
+    @discord.ui.button(label="Approve", style=discord.ButtonStyle.primary,
                         custom_id="nola:order:approve")
     async def approve_btn(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
         order_id = parse_order_id(interaction.message)
@@ -300,7 +300,7 @@ class _ApproveGate(discord.ui.View):
         self.origin_channel_id = origin_channel_id
         self.origin_message_id = origin_message_id
 
-    @discord.ui.button(label="Confirm approval", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="Confirm approval", style=discord.ButtonStyle.primary)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         button.disabled = True
         await interaction.response.edit_message(view=self)
@@ -389,7 +389,7 @@ class OrdersPanelView(discord.ui.View):
             ephemeral=True,
         )
 
-    @discord.ui.button(label="Approve queue", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="Approve queue", style=discord.ButtonStyle.primary)
     async def approve_queue(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
         if not is_staff(interaction.user, self.config):
             await interaction.response.send_message(

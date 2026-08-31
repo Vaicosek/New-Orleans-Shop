@@ -62,7 +62,7 @@ def build_admin_embed(config) -> discord.Embed:
             )
             cat_lines.append(f"{c['name']}: {len(c['items'])} item(s) ({sub_bits})")
     body = f"{len(items)} active item(s). Staff-only actions below.\n\n" + rows(cat_lines)
-    return panel_embed("Admin", body)
+    return panel_embed("Admin", body, tone="brand")
 
 
 def build_treasury_embed() -> discord.Embed:
@@ -73,7 +73,7 @@ def build_treasury_embed() -> discord.Embed:
         bal = money.balance(subject)
         held = f"  ({money_text(bal.held)} held)" if bal.held else ""
         lines.append(f"{label}: {money_text(bal.coins)}{held}")
-    return panel_embed("Treasury", rows(lines))
+    return panel_embed("Treasury", rows(lines), tone="brand")
 
 
 class _FundAmountModal(discord.ui.Modal):
@@ -470,7 +470,7 @@ class AdminPanelView(_StaffGatedView):
     async def open_market(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
         await interaction.response.send_modal(_OpenMarketModal())
 
-    @discord.ui.button(label="Resolve market", style=discord.ButtonStyle.danger, row=1)
+    @discord.ui.button(label="Resolve market", style=discord.ButtonStyle.secondary, row=1)
     async def resolve_market(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
         markets = queries.list_open_markets(include_closed=True, limit=25)
         options = [(m["question"][:100], str(m["id"])) for m in markets]
@@ -510,7 +510,7 @@ class AdminPanelView(_StaffGatedView):
             ephemeral=True,
         )
 
-    @discord.ui.button(label="Void market", style=discord.ButtonStyle.danger, row=1)
+    @discord.ui.button(label="Void market", style=discord.ButtonStyle.secondary, row=1)
     async def void_market(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
         markets = queries.list_open_markets(include_closed=True, limit=25)
         options = [(m["question"][:100], str(m["id"])) for m in markets]
@@ -537,7 +537,7 @@ class AdminPanelView(_StaffGatedView):
         await interaction.response.defer(ephemeral=True)
         await interaction.followup.send(embed=build_treasury_embed(), ephemeral=True)
 
-    @discord.ui.button(label="Fund treasury", style=discord.ButtonStyle.danger, row=2)
+    @discord.ui.button(label="Fund treasury", style=discord.ButtonStyle.primary, row=2)
     async def fund(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
         """Owner-only. Without this nothing can put gold into the system and
         every payout fails with an empty treasury."""

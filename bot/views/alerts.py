@@ -52,7 +52,7 @@ def build_alert_embed(due_row: dict) -> discord.Embed:
         f"{due_row['qty']} left, threshold is {due_row['threshold']} "
         f"(capacity {due_row['capacity']})."
     )
-    return panel_embed(f"Restock: {due_row['name']}", body,
+    return panel_embed(f"Restock: {due_row['name']}", body, tone="warn",
                         footer=_alert_footer(due_row["item_id"], code))
 
 
@@ -103,7 +103,7 @@ class AlertAckView(discord.ui.View):
                 stock = catalog.get_stock(item_id)
                 body = f"Acknowledged at {stock['pieces']} left. Will re-fire if it gets worse."
                 await interaction.message.edit(
-                    embed=panel_embed(f"Restock: {item['name']}", body,
+                    embed=panel_embed(f"Restock: {item['name']}", body, tone="warn",
                                        footer=interaction.message.embeds[0].footer.text),
                 )
         except discord.HTTPException:

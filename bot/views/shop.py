@@ -105,11 +105,25 @@ class _QuantityModal(discord.ui.Modal):
                 orders_core.set_message(order_id, str(channel.id), str(posted.id))
 
 
+# The site's own address. Not a config value: it is the one place this shop
+# lives and it is already in CONTRACT.md section 10 and on the domain itself,
+# so an env var would be a setting nobody would ever change and one more thing
+# that can be blank at boot.
+SITE_URL = "https://neworleansshop.org/"
+
+
 class ShopPanelView(discord.ui.View):
     def __init__(self, owner_id: int, orders_channel_id: int | None) -> None:
         super().__init__(timeout=300)
         self.owner_id = owner_id
         self.orders_channel_id = orders_channel_id
+        # The full sheet is a scrolling page with every category on it, and
+        # Discord is a bad place to read one. A link button costs no round
+        # trip and no callback -- Discord opens it itself -- and it is the
+        # only affordance here that answers "just show me everything".
+        self.add_item(discord.ui.Button(label="Full price sheet",
+                                        style=discord.ButtonStyle.link,
+                                        url=SITE_URL))
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.owner_id:

@@ -19,7 +19,34 @@ import discord
 from core import pricing
 from core.pricing import price_label
 
-EMBED_COLOR = discord.Color.dark_gold()
+# The colour bar is the only thing in an embed that a person reads before the
+# words, so it has to SAY something. One colour on every panel says "this bot
+# has a brand" and nothing else, which is the same as saying nothing -- and it
+# is the single most reliable tell of a generated bot.
+#
+# Five tones, each tied to a meaning a reader acts on:
+#   neutral  no bar at all. A board, a list, a lookup -- information, no verdict.
+#   brand    the flag's gold. Official statements the shop is making: the
+#            storefront, the admin panel, a settlement.
+#   gain     money arrived.
+#   loss     it failed, it was cancelled, or money left.
+#   warn     something needs attention but nothing has gone wrong yet.
+#
+# Neutral is the DEFAULT and should stay the commonest. A page of coloured bars
+# is the rainbow problem wearing a semantic disguise.
+# Built from ints via discord.Color, not Colour.from_str(): the constructor
+# does not exist in every version this may run under, and the British spelling
+# is an alias the test stub does not carry. An int and the US spelling work
+# everywhere. The literals are the site's own tokens.
+TONES: "dict[str, object | None]" = {
+    "neutral": None,
+    "brand":   discord.Color(0xD9B544),   # the site's --accent
+    "gain":    discord.Color(0x7FB56A),
+    "loss":    discord.Color(0xD0503A),   # the flag's red, muted
+    "warn":    discord.Color(0xC98A3A),
+}
+
+EMBED_COLOR = TONES["brand"]   # kept: older call sites import this by name
 SEP = "·"  # ' · ' joins fields on one row -- never ASCII '--'.
 
 
@@ -65,11 +92,20 @@ def price_only(price_coins: int, price_unit_pieces: int,
     return price_label(price_coins, price_unit_pieces, stack_size)
 
 
-def panel_embed(title: str, description: str = "", *, footer: str | None = None) -> discord.Embed:
+def panel_embed(title: str, description: str = "", *, footer: str | None = None,
+                tone: str = "neutral") -> discord.Embed:
     """One line if it can be one line; no emoji in the title -- CONTRACT.md
     section 7. Callers pass plain text; this does not scrub emoji for them,
-    it just never adds any of its own."""
-    e = discord.Embed(title=title, description=description, color=EMBED_COLOR)
+    it just never adds any of its own.
+
+    `tone` picks the colour bar from TONES above. It defaults to neutral --
+    no bar -- because most panels are information and a colour that means
+    nothing is worse than no colour. An unknown tone falls back to neutral
+    rather than raising: a typo in a decorative argument must never be able
+    to take down a panel somebody is waiting on.
+    """
+    e = discord.Embed(title=title, description=description,
+                      color=TONES.get(tone))
     if footer:
         e.set_footer(text=footer)
     return e
