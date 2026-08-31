@@ -91,6 +91,49 @@ Website only — the public pages work without these, but the sign-in button doe
 appear: `NOLA_DISCORD_CLIENT_ID`, `NOLA_DISCORD_CLIENT_SECRET`,
 `NOLA_DISCORD_REDIRECT_URI`, `NOLA_STAFF_DISCORD_IDS`.
 
+## Domain and TLS — neworleansshop.org
+
+**Not a Cloudflare tunnel**, though `.env.example` said so at first. A tunnel needs
+`cloudflared` running beside the web process; this container has no shell and one
+process slot, so there is nothing to run it. Cloudflare's proxy points at the panel's
+port allocation directly instead:
+
+| Step | Where | Value |
+|---|---|---|
+| 1 | registrar (where the domain was bought) | change nameservers to the two Cloudflare gives you |
+| 2 | Cloudflare → DNS | `A` record, name `@`, content = the **IP** from Wispbyte → Network, **Proxied** (orange cloud) |
+| 3 | Cloudflare → DNS | `CNAME` `www` → `neworleansshop.org`, Proxied |
+| 4 | Cloudflare → Rules → Origin Rules | *Rewrite to* → **Destination Port** → the **port** from Wispbyte → Network |
+| 5 | Cloudflare → SSL/TLS → Overview | **Flexible** |
+| 6 | Discord Developer Portal → OAuth2 → Redirects | `https://neworleansshop.org/auth/callback` |
+
+Step 5 is Flexible because the origin is plain HTTP on a game-panel allocation with no
+certificate of its own. Cloudflare terminates TLS at the edge, which is what makes the
+`https://` callback Discord insists on possible at all. Full/Strict would require a
+certificate on the origin, which the panel cannot issue.
+
+Step 4 is the one people skip. Cloudflare's proxy only accepts visitor traffic on the
+standard ports; the allocation is not one of them, so without the Origin Rule the edge
+tries port 443 on the origin and gets nothing.
+
+### The port the site binds
+
+`run_web.py` resolves, in order: `SERVER_PORT` (injected by Pterodactyl — the
+allocation), `PORT` (most PaaS hosts), `NOLA_WEB_PORT` (ours), then `8080`. Host first,
+deliberately: the panel routes to the allocation it chose, and a number we picked is
+only meaningful when nothing else decided.
+
+Binding the wrong port **succeeds** — the process starts clean, prints nothing unusual,
+and every request from the panel arrives at a port with nothing on it. With no shell
+there is nothing to inspect afterwards, so the bound address and the variable it came
+from are printed at startup:
+
+    web: binding 0.0.0.0:25580 (from SERVER_PORT)
+
+`0.0.0.0`, never `SERVER_IP`: inside a container that variable can hold the
+allocation's public address, which is on no local interface, and binding it fails
+outright.
+
 ## Running the tests
 
     python run_tests.py

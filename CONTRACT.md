@@ -263,10 +263,16 @@ registrable mark -- "New Orleans" plus a generic noun is primarily geographicall
 descriptive under Lanham Act S2(e)(2) -- so there is nothing to collide with. The
 market's Discord display name stays **New Orleans**; `nola` remains internal only (S2).
 
-Reached over a Cloudflare tunnel pointed at `NOLA_WEB_PORT`. The OAuth2 redirect URI
-is `https://neworleansshop.org/auth/callback` -- the public https address, never
-localhost and never the tunnel's internal port, and it must match the Developer
-Portal entry byte for byte.
+**Not a Cloudflare tunnel.** `cloudflared` has to run alongside the web process, and
+the Wispbyte container has no shell and one process slot. The site is instead reached
+through Cloudflare's proxy pointed straight at the panel's port allocation: a proxied
+`A` record, an Origin Rule rewriting the destination port to that allocation, and
+SSL/TLS in Flexible mode so the edge terminates https over a plain-http origin.
+
+The process binds `SERVER_PORT` -- the allocation Pterodactyl injects -- ahead of any
+port of our own (S11). The OAuth2 redirect URI is
+`https://neworleansshop.org/auth/callback`: the public https address, never localhost
+and never the allocation's port, matching the Developer Portal entry byte for byte.
 
 Three audiences, one shell.
 
