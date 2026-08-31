@@ -359,7 +359,61 @@ over the table when set. `DISCORD_TOKEN`, `GUILD_ID`, `NOLA_GAME_SEED_SECRET` an
 `.env` keys are documented in `docs/deploy.md` by NAME only. No token, webhook, secret or
 access-granting id is ever written into this repo or the brain.
 
-## 12. Open — John decides
+## 12. Reference market — read-only, and it stays that way
+
+New Orleans mirrors one other server's public market so the owner can see what an item
+fetches somewhere with real volume before he sets a price here. Source: DiplomaticaMC's
+market at `market.diplomaticamc.com`, endpoint `GET /api/market?limit=&offset=`, page cap
+500, catalogue ~765 items — **two requests per cycle, four cycles a day.**
+
+**It never writes a price.** Their figures are in a different currency on a different
+server: `0.0157` there and `3 g` here are not two measurements of one thing, and code that
+treated them as one would produce a confident wrong number. The absolute prices do not
+convert and are never presented as if they do. What reads across is the shape — which of
+our items people over there are short of — and reading shape is a person's job. No path in
+this project may write `ref_market` into `items`, and the staff page offers no button that
+would.
+
+**It never fails anything.** `core/refmarket.pull()` returns `(rows, error)` and does not
+raise. A failed cycle logs one line, records the error, and leaves the previous mirror in
+place. The shop is the product; the feed is a convenience.
+
+**It is a polite client of somebody else's server.** Their `robots.txt` grants
+`User-agent: *` `Allow: /` with `Content-Signal: use=reference` — which is exactly what
+this is — while naming and disallowing the AI training crawlers. So: an honest
+`User-Agent` naming this shop and its site, never a spoofed browser; on `429` or `503` the
+cycle stops where it stands and waits for the next one, with **no retry**; and the loop
+starts after the gateway is ready rather than at process start, so a container restart loop
+cannot turn into a request storm. `NOLA_REFMARKET_ENABLED=0` switches the whole thing off
+from the panel without a deploy.
+
+**Storage.** `ref_market` holds one row per (source, item_key), **replaced whole** each
+cycle so a delisted item disappears instead of sitting there at a stale price. `price` is
+REAL while every coin in this database is an integer — that is deliberate and is the mark
+that this column is a quoted observation and not money. No history is kept: the source
+publishes its own 7-day trend, and 765 rows every six hours forever would cost more than
+it tells anyone.
+
+**Health is measured on the last SUCCESS, not on the rows.** `ref_market_runs` separates
+`ok_at` from `attempted_at` because a feed that died three days ago still has a full table
+and would otherwise pass its own check. The boot block prints that line.
+
+**Matching.** `core.refmarket.match_name()` is the single rule that lines their catalogue
+up with ours: lowercase, strip the namespace, keep letters and digits.
+`minecraft:smooth_stone`, `SMOOTH_STONE` and `Smooth Stone` all become `smoothstone`.
+Deliberately exact — a fuzzy matcher would pair `Oak Log` with `Oak Wood` and hand the
+owner a price for the wrong item, which is worse than no price. It is written **once**, in
+Python, and the staff view joins in Python through the same function; a second copy of the
+rule in SQL would be two rules that have to agree forever, failing as an empty column
+rather than an error. Unmatched items still appear, with empty columns.
+
+**Not yet verified in production.** The pull has never run from the panel — this
+environment's egress cannot reach the host, so the parser is proven against a captured real
+payload (`tests/test_refmarket.py`) and nothing more. The boot block's
+`reference market:` line is the verification, and until it reads `last success` this
+feature is unproven.
+
+## 13. Open — John decides
 
 1. ~~**Currency name.**~~ Decided and DONE: gold ingots, symbol `g`, whole numbers (S2, S5). The leftover `core.config.currency_name`/`CURRENCY_NAME` setting has been **removed** -- it is gone from `core/config.py` and no code reads it. Nothing is left for the integrator to retire here; the only surviving mention is a historical note in a `bot/ui/embed.py` docstring recording that an earlier version took the argument.
 2. **Casino games beyond coinflip and dice.** Blackjack and roulette are real work; worth it

@@ -363,3 +363,52 @@ CREATE TABLE IF NOT EXISTS web_sessions (
     expires_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_sessions_expiry ON web_sessions(expires_at);
+
+-- ---------------------------------------------------------------------------
+-- Reference market (CONTRACT.md section 13)
+--
+-- A read-only mirror of somebody else's public market, kept so the owner can
+-- see what an item fetches elsewhere before he prices it here. NOTHING in
+-- this file is money and nothing here may ever be written into `items` by a
+-- machine: the prices are in a FOREIGN currency on a FOREIGN server, so the
+-- figures are not comparable to `g` in absolute terms and only the shape --
+-- what is dear there and cheap here -- carries information. That is why
+-- `price` is REAL here while every coin in this database is an integer: this
+-- column is a quoted observation, not a balance.
+--
+-- One row per (source, item_key), overwritten each cycle. History is not kept
+-- because the source publishes its own 7-day trend and storing 765 rows every
+-- six hours forever would cost more than it tells anyone.
+CREATE TABLE IF NOT EXISTS ref_market (
+    source        TEXT NOT NULL,
+    item_key      TEXT NOT NULL,
+    display_name  TEXT NOT NULL,
+    -- The normalised name used to line their catalogue up with ours:
+    -- lowercase, letters and digits only. 'Smooth Stone' and 'SMOOTH_STONE'
+    -- both become 'smoothstone'. Stored rather than computed at read time so
+    -- the join can use an index and so a bad normalisation is visible in the
+    -- table instead of hiding inside a query.
+    match_name    TEXT NOT NULL,
+    price         REAL,          -- their price, per piece, their currency
+    price_source  TEXT,          -- how they derived it ('trades_24h', ...)
+    best_ask      REAL,          -- cheapest thing actually for sale, per piece
+    best_bid      REAL,          -- best standing offer to buy, per piece
+    stock         INTEGER,       -- pieces on offer there
+    demand        INTEGER,       -- pieces wanted there -- the number he asked for
+    volume_24h    INTEGER,       -- pieces traded there in 24h
+    fetched_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (source, item_key)
+);
+CREATE INDEX IF NOT EXISTS ix_ref_market_match ON ref_market(match_name);
+
+-- One row per source. Exists because "the table has rows" and "the pull is
+-- still working" are different facts, and a dead feed that still has last
+-- week's numbers in it looks exactly like a healthy one. Every field here is
+-- about the LAST ATTEMPT, not the last success, except ok_at.
+CREATE TABLE IF NOT EXISTS ref_market_runs (
+    source        TEXT PRIMARY KEY,
+    ok_at         TEXT,          -- last cycle that actually stored rows
+    attempted_at  TEXT,          -- last cycle that ran at all
+    rows          INTEGER NOT NULL DEFAULT 0,
+    error         TEXT           -- NULL when the last attempt succeeded
+);

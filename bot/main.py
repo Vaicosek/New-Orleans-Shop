@@ -23,7 +23,7 @@ import logging
 import discord
 from discord.ext import commands
 
-from core import db, games, money, pricing
+from core import db, games, money, pricing, refmarket
 from core.config import BotConfig, ConfigError, load_bot_config
 
 from .views.alerts import AlertAckView
@@ -155,6 +155,7 @@ class NolaBot(commands.Bot):
         _admin_cog = self.get_cog("AdminCog")
         if _admin_cog is not None and hasattr(_admin_cog, "scan_health"):
             lines.append(_admin_cog.scan_health())
+        lines.append(refmarket.health())
         lines.append(f"currency: {pricing.CURRENCY} (gold ingots, whole numbers)")
         lines.extend(_database_lines())
         lines.append("=" * 60)

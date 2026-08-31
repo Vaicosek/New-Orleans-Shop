@@ -107,6 +107,11 @@ Website only — the public pages work without these, but the sign-in button doe
 appear: `NOLA_DISCORD_CLIENT_ID`, `NOLA_DISCORD_CLIENT_SECRET`,
 `NOLA_DISCORD_REDIRECT_URI`, `NOLA_STAFF_DISCORD_IDS`.
 
+Reference market (CONTRACT.md section 12) — both optional, both have working defaults:
+`NOLA_REFMARKET_URL` (the other market's origin) and `NOLA_REFMARKET_ENABLED` (set to
+`0` to switch the six-hourly pull off from the panel without a deploy). Neither is a
+secret; the endpoint is public.
+
 ## Domain and TLS — neworleansshop.org
 
 **Not a Cloudflare tunnel**, though `.env.example` said so at first. A tunnel needs

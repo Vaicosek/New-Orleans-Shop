@@ -1,5 +1,11 @@
-"""`/admin` -- the only admin-facing slash command, plus the restock-alert
-background scan that posts to `ALERTS_CHANNEL_ID`.
+"""`/admin` -- the only admin-facing slash command, plus the two background
+loops: the restock-alert scan that posts to `ALERTS_CHANNEL_ID`, and the
+six-hourly pull of the reference market (CONTRACT.md section 13).
+
+Both loops live here rather than in their own cogs because this host gives the
+project ONE process slot: a loop in a cog that failed to import is a loop that
+never runs, and keeping them beside the panel that reports their health means
+there is exactly one place to look when something has stopped.
 """
 from __future__ import annotations
 
@@ -9,7 +15,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-from core import alerts
+from core import alerts, refmarket
 
 from .. import layout
 from ..permissions import is_staff
@@ -25,9 +31,11 @@ class AdminCog(commands.Cog):
         self.last_scan_ok_at: datetime | None = None
         self.last_scan_error: str | None = None
         self.scan_alerts.start()
+        self.pull_reference_market.start()
 
     def cog_unload(self) -> None:
         self.scan_alerts.cancel()
+        self.pull_reference_market.cancel()
 
     @app_commands.command(name="admin", description="Items, prices, thresholds, markets, treasury.")
     async def admin(self, interaction: discord.Interaction) -> None:
@@ -91,6 +99,38 @@ class AdminCog(commands.Cog):
 
     @scan_alerts.before_loop
     async def before_scan(self) -> None:
+        await self.bot.wait_until_ready()
+
+    # ------------------------------------------------------------------
+    # Reference market. Someone else's server, so: six hours, two requests,
+    # an honest User-Agent, and no retry on a throttle. See core/refmarket.py.
+    # ------------------------------------------------------------------
+    @tasks.loop(hours=6)
+    async def pull_reference_market(self) -> None:
+        """One cycle. `refmarket.pull()` never raises, so this cannot kill the
+        loop -- but the try/except stays anyway, because that guarantee lives
+        in another file and a loop that dies here dies silently for the life
+        of the process."""
+        try:
+            rows, error = await refmarket.pull()
+        except Exception as err:            # noqa: BLE001 -- a feed, not the shop
+            print(f"[refmarket] cycle raised: {err!r}", flush=True)
+            return
+        if error:
+            print(f"[refmarket] {error}", flush=True)
+        else:
+            print(f"[refmarket] {rows} items refreshed from {refmarket.SOURCE}", flush=True)
+
+    @pull_reference_market.error
+    async def pull_reference_market_error(self, err: BaseException) -> None:
+        print(f"[refmarket] loop crashed: {err!r} -- restarting", flush=True)
+
+    @pull_reference_market.before_loop
+    async def before_pull(self) -> None:
+        # Deliberately AFTER ready and not at t=0 of the process: a restart
+        # loop on this host would otherwise turn into a request every time
+        # the container bounces, which is the one thing a polite client of
+        # somebody else's API must not do.
         await self.bot.wait_until_ready()
 
 

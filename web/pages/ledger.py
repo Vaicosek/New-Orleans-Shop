@@ -11,8 +11,10 @@ from __future__ import annotations
 
 from aiohttp import web
 
+from core import refmarket
 from core.catalog import categories_with_items
 from core.db import connection
+from core import pricing
 from core.pricing import money_text, price_label
 
 from ..auth import resolve_identity
@@ -51,6 +53,62 @@ def _audit() -> list[dict]:
         " ORDER BY id DESC LIMIT 50"
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+def _num(value, places: int = 4) -> str:
+    """A quoted foreign figure, or an em-dash.
+
+    Em-dash, never 0: "they do not list this" and "they price it at nothing"
+    are different facts and must not look the same. Trailing zeros are
+    trimmed so a column of 0.0156 and 3 reads as numbers rather than as a
+    fixed-width machine dump.
+    """
+    if value is None:
+        return "&mdash;"
+    if isinstance(value, int):
+        return f"{value:,}"
+    text = f"{value:,.{places}f}".rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def _reference_market() -> str:
+    """Our catalogue with the other market's figures beside it.
+
+    Read-only, and it stays read-only: nothing on this page offers to apply a
+    price. Their numbers are in another server's currency, so the absolute
+    figures are not ours to copy -- what is worth reading is which of our
+    items people over there are actually short of.
+    """
+    try:
+        rows = refmarket.compare()
+    except Exception as err:              # noqa: BLE001 -- a feed, not the ledger
+        return f'<p class="empty">Reference market unavailable: {esc(err)}</p>'
+
+    matched = [r for r in rows if r["ref_name"] is not None]
+    if not matched:
+        return ('<p class="empty">Nothing pulled yet, or none of our items appear '
+                'on their market.</p>')
+
+    body = "".join(
+        f'<tr><td>{esc(r["name"])}</td>'
+        f'<td class="num">{esc(price_label(r["price_coins"], r["price_unit_pieces"], r["stack_size"]))}</td>'
+        f'<td class="num">{_num(r["ref_price"])}</td>'
+        f'<td class="num">{_num(r["best_bid"])}</td>'
+        f'<td class="num{" s-wait" if (r["ref_demand"] or 0) > 0 else ""}">{_num(r["ref_demand"], 0)}</td>'
+        f'<td class="num">{_num(r["ref_stock"], 0)}</td>'
+        f'<td class="num">{_num(r["volume_24h"], 0)}</td></tr>'
+        for r in matched
+    )
+    unmatched = len(rows) - len(matched)
+    tail = (f'<p class="empty">{unmatched:,} of our items do not appear on their '
+            f'market.</p>' if unmatched else "")
+    return (
+        '<div class="tablewrap"><table><thead><tr>'
+        '<th>Item</th><th class="num">Our price</th><th class="num">Their price</th>'
+        '<th class="num">Their bid</th><th class="num">Wanted there</th>'
+        '<th class="num">On offer there</th><th class="num">Traded 24h</th>'
+        f'</tr></thead><tbody>{body}</tbody></table></div>{tail}'
+    )
 
 
 def _table(headers: list[str], nums: set[int], rows: list[str], empty_text: str) -> str:
@@ -144,6 +202,14 @@ async def ledger(request: web.Request) -> web.Response:
 {_table(["When", "Subject", "Amount", "Reason"], {2}, settlement_rows, "No settlements yet.")}
 <h2>Audit trail</h2>
 {_table(["When", "Actor", "Kind", "Summary", "Amount"], {4}, audit_rows, "No audit entries yet.")}
+
+<h2>Reference market</h2>
+<p>Their prices are in their server's currency, not in {esc(pricing.CURRENCY)}
+&mdash; the two are not the same unit and the figures do not convert. What reads
+across is the shape: which of our items people over there are short of. Nothing
+here changes a price.</p>
+<p class="dim">{esc(refmarket.health())}</p>
+{_reference_market()}
 """
     return page("Ledger", "ledger", body, identity=identity)
 
