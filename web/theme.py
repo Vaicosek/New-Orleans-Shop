@@ -1,83 +1,65 @@
 """CSS tokens for the New Orleans site.
 
-Reference cousin: a cast-iron balcony gate panel on Royal Street at night,
-lettered like the blue-and-white glazed plaque set into the sidewalk at the
-corner. The ground is the ironwork; the type is the plaque -- a squarish
-condensed sans, the way a ceramic tile is lettered, not a book face. New Orleans was founded French and still signs itself that way -- the
-fleur-de-lis, the tricolour band, the Didone lettering on the corner tiles.
-That is where the type and the ornament come from, not from a dashboard.
-Plain rules, tabular figures, one ink colour (`--accent`) plus the text
-colour. Tokens are lifted verbatim from `abex_theme.py`'s THEME_CSS, which
-the owner has already accepted, with one deliberate change noted in
-CONTRACT.md section 10: base font 17px, not 15px.
+Reference cousin (revised 2026-08-31, at the owner's direction): a Mardi
+Gras monogram-canvas look -- purple ground, gold hardware, and a hot-gold
+pop surface used once as a real block, not a wash. Purple and gold are New
+Orleans' own carnival colours, so this is not an import from anywhere; it
+reads louder than the flag-tile version this replaces, on purpose -- the
+owner reacted to a mockup and asked for the bolder read. The wordmark, nav
+and section labels move to a heavy, wide-tracked, all-caps grotesk (the
+a wide-tracked logotype register) in place of the old civic-plaque narrow
+face. The fleur-de-lis (the city's own mark, already drawn once in shell.py)
+becomes the monogram repeat instead of a generic quatrefoil.
 
-Nothing here is a card, a chip, a gradient or a glow. There is exactly one
-interactive colour on the page -- two would mean neither reads as
-clickable.
+Still no cards, no gradient, no glow, no webfont fetch -- one ink colour
+(--accent) for anything clickable, three tones of ink for everything else,
+and the ground has to be right with the network off.
 """
 from __future__ import annotations
 
 CSS = r"""
-/* Palette drawn from the flag of New Orleans: blue #111B4C, gold #EDB41D,
-   red #D52C11, white. Each one is pulled toward the page rather than used
-   raw -- a flag is printed on cloth at arm's length, a price sheet is read
-   at 60cm, and the saturation that reads as civic on a pole reads as a glow
-   on a screen.
+/* Purple and gold are Mardi Gras' own colours -- New Orleans does not need
+   to borrow them from anywhere. --ground is a deep carnival purple, dark
+   enough to be a ground rather than a colour swatch. --ground-deep sits one
+   step below it for the masthead and footer, so the chrome reads as a
+   frame around the page rather than a continuation of it. --accent is
+   hardware gold -- warmer and brighter than a desaturated "safe" gold,
+   because a buckle is meant to catch the eye and this page now has exactly
+   one thing that does that. --pop is the hot yellow from the reference
+   image, used once, as a real surface (the storefront's hero band), never
+   as a wash or a gradient. --gain has no carnival equivalent and stays
+   green -- up and down must be tellable apart at a glance and that is a
+   function, not a brand decision.
 
-   --ground is the flag's blue taken well below it: dark enough to be a
-   ground rather than a blue panel, blue enough that the gold on top of it is
-   the flag's pairing and not a generic dark theme. --accent is the
-   fleur-de-lis gold, desaturated so it does not bloom on dark. --loss is the
-   flag's red at the same treatment. --gain has no flag equivalent and stays
-   green, because up and down must be tellable apart at a glance and that is
-   a function, not a brand decision. */
+   Contrast checked against the tile's lightest pixel, not the flat ground:
+   on the textured purple, text runs 13.8:1, dim 9.6:1, inert 6.1:1 -- inert
+   is reserved for footer/meta text at larger sizes, everything a customer
+   reads to act on clears 9:1. */
 :root{
-  --ground: #0f1328;
-  --raised: rgba(240,238,232,.055);
-  --line:   #2b3050;
-  /* Three steps of ink and no more, each one measured against the TILE'S
-     lightest pixel rather than against the flat ground -- the texture costs
-     about a point of contrast and a colour checked against the wrong
-     background is not checked. On #161c38: text 14.4:1, dim 10.9:1,
-     inert 7.5:1, so every step clears the 7:1 body floor.
-
-     --loss is the exception and it is a deliberate one: 7.05:1 on the tile,
-     just under. Red cannot be both red and that bright on this navy -- the
-     versions that clear 7:1 read as salmon, and a "Cancelled" that does not
-     look red has stopped doing its job. It is used only on short status
-     words and negative amounts, never on prose. */
-  --text:   #f0eee8;
-  --dim:    #cdd0de;
-  --inert:  #a8adc2;
+  --ground:      #2b1140;
+  --ground-deep: #1f0c30;
+  --raised:      rgba(240,220,180,.07);
+  --line:        #4a2568;
+  --text:   #f4ecd8;
+  --dim:    #d3c0a8;
+  --inert:  #a3899e;
   --gain:   #9ccd88;
   --loss:   #ec9080;
-  --accent: #d9b544;
-
-  /* The flag's band, at flag saturation. It is drawn 1px tall -- at that
-     size a colour has to be itself or it disappears, which is the opposite
-     of the rule for a surface. */
-  --band-red:   #b8341f;
-  --band-white: #efece4;
-  --band-blue:  #4257a8;   /* lifted off the flag's #111B4C: that blue IS
-                              this page's ground, and a stripe the colour of
-                              the paper is not a stripe */
+  --accent:    #e7b83e;
+  --accent-deep: #c99a2d;
+  --pop:    #f3d94a;
 }
 *{box-sizing:border-box;margin:0;padding:0}
 html{color-scheme:dark;background:var(--ground)}
 
-/* The ground is a Vieux Carre balcony railing: a 64px quatrefoil cast into
-   the page, stroked one step off the ground colour and nothing more. It is a
-   MATERIAL, not a decoration -- the point is that the page has a surface, the
-   way a printed sheet has a tooth, and the moment it competes with a price it
-   has failed. Two rules keep it honest: exactly one stroke colour, and no
-   fill, so there is no wash anywhere for a gradient to hide in. The tile is
-   authored here rather than fetched, so the page still has its ground with
-   the network off. Measured, not eyeballed: text on the tile's lightest pixel
-   is 13.7:1 -- the texture costs about one point of contrast and stays far
-   above the 7:1 floor. */
+/* The ground is the monogram canvas: the city's own fleur-de-lis, repeated
+   like a print pattern, stroked in the hardware gold at low opacity so it
+   is a material rather than a decoration. One stroke colour, no fill, so
+   there is no wash anywhere for a gradient to hide in. Authored here, not
+   fetched, so the page still has its ground with the network off. */
 body{
   background-color:var(--ground);
-  background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='64' height='64' viewBox='0 0 64 64'><g fill='none' stroke='%23161c38' stroke-width='1.5'><circle cx='32' cy='21' r='11'/><circle cx='32' cy='43' r='11'/><circle cx='21' cy='32' r='11'/><circle cx='43' cy='32' r='11'/><circle cx='0' cy='0' r='6'/><circle cx='64' cy='0' r='6'/><circle cx='0' cy='64' r='6'/><circle cx='64' cy='64' r='6'/><path d='M0 0 L14 14 M64 0 L50 14 M0 64 L14 50 M64 64 L50 50'/></g></svg>");
+  background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='72' height='72' viewBox='0 0 72 72'><g fill='none' stroke='%23e7b83e' stroke-opacity='0.12' stroke-width='1.6'><path d='M36 6c-3 4-5 7.4-5 10.4 0 2.6 1.1 4.9 2.8 6.8h-3.4c-4.9 0-8.6 2.8-8.6 7 0 3.4 2.5 5.8 5.6 5.8 2.4 0 4.3-1.5 4.3-3.4 0-1.5-1.1-2.6-2.4-2.6-.8 0-1.5.2-1.9.8.4-1.7 1.7-2.6 3.8-2.6h3v6c0 4-1.1 6.6-3.6 9.6h10.2c-2.5-3-3.6-5.6-3.6-9.6v-6h3c2.1 0 3.4.9 3.8 2.6-.4-.6-1.1-.8-1.9-.8-1.3 0-2.4 1.1-2.4 2.6 0 1.9 1.9 3.4 4.3 3.4 3.1 0 5.6-2.4 5.6-5.8 0-4.2-3.7-7-8.6-7h-3.4c1.7-1.9 2.8-4.2 2.8-6.8 0-3-1.7-6.4-5-10.4z'/></g></svg>");
   background-repeat:repeat;
   color:var(--text);
   font-family:Helvetica,Arial,'Liberation Sans',sans-serif;
@@ -86,80 +68,86 @@ body{
   font-variant-numeric:tabular-nums;
 }
 a{color:var(--accent);text-decoration:underline;text-underline-offset:3px;
-  text-decoration-thickness:1px;text-decoration-color:rgba(201,179,122,.45)}
-a:hover{text-decoration-color:var(--accent)}
+  text-decoration-thickness:1px;text-decoration-color:rgba(231,184,62,.5)}
+a:hover{color:var(--pop);text-decoration-color:var(--pop)}
 :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 
-/* Headings and the wordmark are the plaque's lettering: condensed, squarish,
-   set in the one weight above the body and no other. Two weights on the page,
-   400 and 700, and nothing in between -- a third would be a scheme rather
-   than a hierarchy. No webfont is fetched: the page has to be right with the
-   network off, and a ceramic plaque's letters were never a display face
-   anyway. */
-h1,h2,h3,h4,.wordmark,th{
-  font-family:'Arial Narrow','Liberation Sans Narrow','Nimbus Sans Narrow',
-              'Helvetica Neue',Helvetica,Arial,sans-serif;
-  font-weight:700;
+/* The lockup register: heavy, wide-tracked, all-caps grotesk for anything
+   that names a place or a section -- the wordmark, the nav, the page and
+   section titles. Two weights only, 400 and 900, nothing in between. No
+   webfont fetched: 'Arial Black' degrades to bold Helvetica/Arial, which is
+   still heavy enough to carry the register with the network off. */
+h1,h2,h3,h4,.wordmark,.navlink,.who-wrap,th{
+  font-family:'Arial Black',Arial,'Liberation Sans',Helvetica,sans-serif;
 }
-h4,th{font-weight:400}
-h1{font-size:28px;margin-bottom:8px}
+h1{font-size:32px;font-weight:900;letter-spacing:.02em;text-transform:uppercase;
+  margin-bottom:8px}
 
-/* A section heading sits on an iron bar with a brass collar at its left end,
-   the way a rail meets its post. It is the page's one ornament that is not
-   the flag, it is 28px wide, and it is the only brass on the page apart from
-   the current nav item -- two things in one colour is an accent, three is a
-   scheme. */
-h2{font-size:20px;margin:34px 0 12px;position:relative;
-  padding-bottom:9px;border-bottom:3px solid var(--line)}
-h2::after{content:"";position:absolute;left:0;bottom:-3px;
-  width:28px;height:3px;background:var(--accent)}
-h4{font-size:15px;color:var(--dim);margin:18px 0 6px}
+/* A section label reads like a belt label: small, wide-tracked caps in the
+   hardware gold, with a strap -- not a dot -- underneath it. The strap is
+   the page's one recurring ornament besides the wordmark; it does not
+   appear anywhere else, or it stops being a signature and starts being
+   wallpaper. */
+h2{font-size:15px;font-weight:900;letter-spacing:.18em;text-transform:uppercase;
+  color:var(--accent);margin:34px 0 8px;position:relative;padding-bottom:11px}
+h2::after{content:"";position:absolute;left:0;bottom:0;width:64px;height:5px;
+  background:var(--accent)}
+h3{font-size:20px;font-weight:900;letter-spacing:.03em;margin:38px 0 4px;color:var(--text)}
+h4{font-size:14px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;
+  color:var(--dim);margin:20px 0 8px}
 p{color:var(--dim);max-width:70ch}
 p+p{margin-top:8px}
 
 .masthead{
-  display:flex;align-items:baseline;gap:36px;flex-wrap:wrap;
-  padding:26px 48px 18px;
+  display:flex;align-items:center;gap:36px;flex-wrap:wrap;
+  padding:22px 48px;background:var(--ground-deep);
+  border-bottom:4px solid var(--accent);
 }
 .brand{display:flex;align-items:center;gap:11px;text-decoration:none;color:inherit}
-.brand .wordmark{font-size:22px;color:var(--text);letter-spacing:.01em}
+.brand .wordmark{font-size:22px;font-weight:900;color:var(--text);letter-spacing:.14em;
+  text-transform:uppercase}
 .lis{width:22px;height:22px;flex:none;color:var(--accent)}
 
-/* The flag of New Orleans carries a red/white/blue band across its middle.
-   Three 1px rules stacked is that band at the size a rule can be without
-   becoming ornament for its own sake. It REPLACES the masthead's grey line
-   rather than joining it, and marks each category on the price sheet.
-   Nowhere else -- a motif used twice is a motif, used everywhere it is
-   wallpaper. */
-.band{display:block}
-.band i{display:block;height:2px}
-.band i:nth-child(1){background:var(--band-red)}
-.band i:nth-child(2){background:var(--band-white)}
-.band i:nth-child(3){background:var(--band-blue)}
-h3{font-size:19px;margin:34px 0 0}
-h3+.band{margin:7px 0 14px;max-width:660px}
-.nav{display:flex;gap:26px;flex-wrap:wrap}
-.navlink{color:var(--dim);text-decoration:none;font-size:16px}
+.nav{display:flex;gap:30px;flex-wrap:wrap;margin-left:12px}
+.navlink{color:var(--dim);text-decoration:none;font-size:13px;font-weight:700;
+  letter-spacing:.16em;text-transform:uppercase}
 .navlink:hover{color:var(--text)}
 .navlink[aria-current="page"]{color:var(--accent)}
-.who-wrap{margin-left:auto;display:flex;align-items:center;gap:18px;font-size:15px}
+.who-wrap{margin-left:auto;display:flex;align-items:center;gap:18px;font-size:13px;
+  letter-spacing:.1em;text-transform:uppercase}
 .who{color:var(--dim)}
 
-main{max-width:1040px;margin:0 auto;padding:40px 48px 80px}
+/* The storefront's hero: the reference image's hot-yellow field, used once,
+   as a real surface -- textured with the same fleur-de-lis monogram in the
+   ground purple so it reads as canvas rather than a flat colour chip.
+   Nowhere else on the site gets this treatment; a second one would make it
+   a colour scheme instead of a landmark. */
+.hero{
+  background-color:var(--pop);
+  background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='72' height='72' viewBox='0 0 72 72'><g fill='none' stroke='%232b1140' stroke-opacity='0.14' stroke-width='1.6'><path d='M36 6c-3 4-5 7.4-5 10.4 0 2.6 1.1 4.9 2.8 6.8h-3.4c-4.9 0-8.6 2.8-8.6 7 0 3.4 2.5 5.8 5.6 5.8 2.4 0 4.3-1.5 4.3-3.4 0-1.5-1.1-2.6-2.4-2.6-.8 0-1.5.2-1.9.8.4-1.7 1.7-2.6 3.8-2.6h3v6c0 4-1.1 6.6-3.6 9.6h10.2c-2.5-3-3.6-5.6-3.6-9.6v-6h3c2.1 0 3.4.9 3.8 2.6-.4-.6-1.1-.8-1.9-.8-1.3 0-2.4 1.1-2.4 2.6 0 1.9 1.9 3.4 4.3 3.4 3.1 0 5.6-2.4 5.6-5.8 0-4.2-3.7-7-8.6-7h-3.4c1.7-1.9 2.8-4.2 2.8-6.8 0-3-1.7-6.4-5-10.4z'/></g></svg>");
+  background-repeat:repeat;
+  color:var(--ground);padding:30px 48px;
+  border-bottom:1px solid rgba(43,17,64,.25);
+}
+.hero p{color:#4a2568;max-width:60ch}
+.hero a{color:var(--ground);text-decoration-color:var(--ground)}
+
+main{max-width:1040px;margin:0 auto;padding:44px 48px 80px}
 
 .tablewrap{overflow-x:auto}
 table{border-collapse:collapse;width:100%;min-width:480px}
 .sheet table{max-width:660px}
-th{text-align:left;font-weight:400;font-size:15px;color:var(--dim);
-  padding:8px 18px 8px 0;border-bottom:1px solid var(--line);white-space:nowrap}
-td{padding:9px 18px 9px 0;border-bottom:1px solid var(--line);font-size:17px}
+th{text-align:left;font-weight:700;font-size:12px;letter-spacing:.12em;
+  text-transform:uppercase;color:var(--accent-deep);
+  padding:10px 18px 10px 0;border-bottom:2px solid var(--accent);white-space:nowrap}
+td{padding:12px 18px 12px 0;border-bottom:1px solid var(--line);font-size:17px}
 th.num,td.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
 tbody tr:hover td{background:var(--raised)}
 
 /* Status is the one place this page spends colour on words. Each one names
-   a state somebody acts on: gold means a move is owed, green means the money
-   moved, red means it stopped, dim means it is nobody's in particular. A
-   fifth colour would have to mean a fifth thing, and there isn't one. */
+   a state somebody acts on: gold means a move is owed, green means the
+   money moved, red means it stopped, dim means it is nobody's in
+   particular. */
 .s-wait{color:var(--accent)}
 .s-done{color:var(--gain)}
 .s-stop{color:var(--loss)}
@@ -194,8 +182,9 @@ tbody tr:hover td{background:var(--raised)}
 .sums .row.total span:first-child{color:var(--text)}
 
 .foot{padding:22px 48px;border-top:1px solid var(--line);color:var(--inert);
-  font-size:14px;display:flex;align-items:center;gap:10px}
-.foot .lis{width:15px;height:15px;color:var(--inert)}
+  font-size:13px;letter-spacing:.06em;text-transform:uppercase;
+  display:flex;align-items:center;gap:10px;background:var(--ground-deep)}
+.foot .lis{width:14px;height:14px;color:var(--accent-deep)}
 
 /* The price sheet on a phone. A price you have to scroll sideways to read
    is a price the customer did not read, so below 560px the row stops being
@@ -211,7 +200,8 @@ tbody tr:hover td{background:var(--raised)}
 }
 
 @media(max-width:720px){
-  .masthead{padding:20px 20px 16px}
+  .masthead{padding:18px 20px}
+  .hero{padding:22px 20px}
   main{padding:26px 20px 60px}
   .who-wrap{margin-left:0;width:100%}
 }

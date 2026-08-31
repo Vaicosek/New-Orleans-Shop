@@ -13,7 +13,7 @@ from core.catalog import categories_with_items, get_stock, list_items
 from core.pricing import price_label
 
 from ..auth import resolve_identity
-from ..shell import BAND, esc, page
+from ..shell import esc, page
 
 
 async def storefront(request: web.Request) -> web.Response:
@@ -51,16 +51,16 @@ async def storefront(request: web.Request) -> web.Response:
                     '<th>Item</th><th class="num">Price</th>'
                     f'</tr></thead><tbody>{rows}</tbody></table></div>'
                 )
-            # The flag's band under each category heading -- the price sheet's
-            # only structure beyond the rules in the tables themselves.
-            sections.append(f'<h3>{esc(cat["name"])}</h3>{BAND}' + "".join(group_html))
+            sections.append(f'<h3>{esc(cat["name"])}</h3>' + "".join(group_html))
         table = "".join(sections)
     else:
         table = '<p class="empty">Nothing stocked yet.</p>'
 
     body = f"""
+<div class="hero">
 <h1>New Orleans</h1>
 <p>Goods on offer today. See <a href="/inventory">inventory</a> for quantity on hand.</p>
+</div>
 <h2>Price sheet</h2>
 {table}
 """
@@ -102,8 +102,10 @@ async def inventory(request: web.Request) -> web.Response:
         table = '<p class="empty">Nothing stocked yet.</p>'
 
     body = f"""
+<div class="hero">
 <h1>Inventory</h1>
 <p>Live quantity on hand, both price bases.</p>
+</div>
 {table}
 """
     return page("Inventory", "stock", body, identity=identity)

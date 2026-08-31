@@ -20,10 +20,12 @@ from .auth import Identity
 
 # The city's mark, drawn once and reused. New Orleans is French-founded and
 # signs itself with the fleur-de-lis on the flag, the manhole covers and the
-# corner tiles; it is the one figure on this site that is not a number. Inline
-# so the page carries no image request, and `currentColor` so it takes the
-# gold from the masthead and the muted grey from the footer without a second
-# copy.
+# corner tiles; it is the one figure on this site that is not a number. It
+# now also doubles as the monogram-canvas repeat in theme.py's background
+# patterns, the same way a maker's own emblem becomes its print.
+# Inline so the page carries no image request, and `currentColor` so it
+# takes the gold from the masthead and the muted grey from the footer
+# without a second copy.
 FLEUR = (
     '<svg class="lis" viewBox="0 0 24 24" aria-hidden="true" fill="currentColor">'
     '<path d="M12 1.4c-1.6 2.1-2.5 3.9-2.5 5.5 0 1.4.6 2.6 1.5 3.6H9.2'
@@ -36,8 +38,6 @@ FLEUR = (
     '<path d="M8.5 11.6h7v1.3h-7z"/>'
     '</svg>'
 )
-
-BAND = '<div class="band"><i></i><i></i><i></i></div>'
 
 
 NAV: list[tuple[str, str, str]] = [
@@ -118,7 +118,6 @@ def page(title: str, nav_key: str, body: str, *,
   <nav class="nav">{_nav_html(nav_key, identity)}</nav>
   <div class="who-wrap">{_who_html(identity)}</div>
 </header>
-{BAND}
 <main>
 {body}
 </main>
