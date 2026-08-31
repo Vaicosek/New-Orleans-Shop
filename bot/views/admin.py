@@ -12,7 +12,7 @@ import secrets
 
 import discord
 
-from core import alerts, audit, catalog, money, predictions, pricing
+from core import alerts, audit, catalog, db, money, predictions, pricing
 
 from .. import addressing
 
@@ -662,12 +662,25 @@ class AdminPanelView(_StaffGatedView):
             await inter.response.defer(ephemeral=True)
             subject = money.user(member.id)
             actor = money.user(interaction.user.id)
-            bal = money.balance(subject)
+            # The money write and the audit row commit in ONE transaction --
+            # CONTRACT.md sec 8 rule 6, "never a best-effort side call" --
+            # money.freeze/unfreeze write no audit row themselves, so this
+            # view is where that guarantee has to be made true.
+            with db.db() as conn:
+                bal = money.balance(subject, conn=conn)
+                if bal.frozen:
+                    money.unfreeze(subject, service="owner", actor=actor, conn=conn)
+                    audit.record(conn, actor=actor, target=subject, kind="wallet.unfreeze",
+                                 summary=f"unfroze {subject} via /admin",
+                                 ops=[{"op": "unfreeze", "subject": subject, "reverse": "freeze"}])
+                else:
+                    money.freeze(subject, service="owner", actor=actor, conn=conn)
+                    audit.record(conn, actor=actor, target=subject, kind="wallet.freeze",
+                                 summary=f"froze {subject} via /admin",
+                                 ops=[{"op": "freeze", "subject": subject, "reverse": "unfreeze"}])
             if bal.frozen:
-                money.unfreeze(subject, service="owner", actor=actor)
                 await inter.followup.send(f"{member.display_name}'s wallet unfrozen.", ephemeral=True)
             else:
-                money.freeze(subject, service="owner", actor=actor)
                 await inter.followup.send(f"{member.display_name}'s wallet frozen.", ephemeral=True)
 
         await interaction.response.send_message(
@@ -685,11 +698,23 @@ class AdminPanelView(_StaffGatedView):
             await inter.response.defer(ephemeral=True)
             subject = money.user(member.id)
             actor = money.user(interaction.user.id)
-            if "gambling_blocked" in money.flags(subject):
-                money.clear_flag(subject, "gambling_blocked", service="owner")
+            with db.db() as conn:
+                blocked = "gambling_blocked" in money.flags(subject, conn=conn)
+                if blocked:
+                    money.clear_flag(subject, "gambling_blocked", service="owner", conn=conn)
+                    audit.record(conn, actor=actor, target=subject, kind="wallet.unblock_gambling",
+                                 summary=f"allowed gambling for {subject} via /admin",
+                                 ops=[{"op": "unblock_gambling", "subject": subject,
+                                       "reverse": "block_gambling"}])
+                else:
+                    money.set_flag(subject, "gambling_blocked", service="owner", set_by=actor, conn=conn)
+                    audit.record(conn, actor=actor, target=subject, kind="wallet.block_gambling",
+                                 summary=f"blocked gambling for {subject} via /admin",
+                                 ops=[{"op": "block_gambling", "subject": subject,
+                                       "reverse": "unblock_gambling"}])
+            if blocked:
                 await inter.followup.send(f"{member.display_name} can gamble again.", ephemeral=True)
             else:
-                money.set_flag(subject, "gambling_blocked", service="owner", set_by=actor)
                 await inter.followup.send(f"{member.display_name} is blocked from gambling.", ephemeral=True)
 
         await interaction.response.send_message(
