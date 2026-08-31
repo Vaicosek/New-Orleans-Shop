@@ -13,7 +13,7 @@ from aiohttp import web
 
 from core.catalog import categories_with_items
 from core.db import connection
-from core.pricing import price_label
+from core.pricing import money_text, price_label
 
 from ..auth import resolve_identity
 from ..shell import esc, page
@@ -76,7 +76,7 @@ async def ledger(request: web.Request) -> web.Response:
                     identity=identity, status=403)
 
     wallet_rows = [
-        f'<tr><td>{esc(w["subject"])}</td><td class="num">{w["coins"]:,}</td>'
+        f'<tr><td>{esc(w["subject"])}</td><td class="num">{money_text(w["coins"])}</td>'
         f'<td>{"yes" if w["frozen"] else "no"}</td></tr>'
         for w in _wallets()
     ]
@@ -89,13 +89,14 @@ async def ledger(request: web.Request) -> web.Response:
     ]
     settlement_rows = [
         f'<tr><td>{esc(p["ts"])}</td><td>{esc(p["subject"])}</td>'
-        f'<td class="num">{p["delta"]:+,}</td><td>{esc(p["reason"])}</td></tr>'
+        f'<td class="num">{money_text(p["delta"], sign=True)}</td>'
+        f'<td>{esc(p["reason"])}</td></tr>'
         for p in _order_settlements()
     ]
     audit_rows = [
         f'<tr><td>{esc(a["ts"])}</td><td>{esc(a["actor"])}</td>'
         f'<td>{esc(a["kind"])}</td><td>{esc(a["summary"])}</td>'
-        f'<td class="num">{a["money_coins"]:,}</td></tr>'
+        f'<td class="num">{money_text(a["money_coins"])}</td></tr>'
         for a in _audit()
     ]
 
@@ -135,14 +136,14 @@ async def ledger(request: web.Request) -> web.Response:
 <p>Every declared category, including planned ones with nothing stocked yet.</p>
 {catalog_table}
 <h2>Balances</h2>
-{_table(["Subject", "Coins", "Frozen"], {1}, wallet_rows, "No wallets yet.")}
+{_table(["Subject", "Balance", "Frozen"], {1}, wallet_rows, "No wallets yet.")}
 <h2>Open orders</h2>
 {_table(["Order", "Item", "Requested", "Produced", "Status", "Price"], {2, 3, 5},
         order_rows, "No open orders.")}
 <h2>Order settlements</h2>
 {_table(["When", "Subject", "Amount", "Reason"], {2}, settlement_rows, "No settlements yet.")}
 <h2>Audit trail</h2>
-{_table(["When", "Actor", "Kind", "Summary", "Coins"], {4}, audit_rows, "No audit entries yet.")}
+{_table(["When", "Actor", "Kind", "Summary", "Amount"], {4}, audit_rows, "No audit entries yet.")}
 """
     return page("Ledger", "ledger", body, identity=identity)
 

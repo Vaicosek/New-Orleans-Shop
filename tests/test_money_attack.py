@@ -486,6 +486,61 @@ check("FIXED: ensure_wallet(subject, deficit_floor=X) actually applies X once a 
 check("user() can never itself produce a bare 'treasury:...' subject",
       not money.user("treasury:games").startswith("treasury:"))
 
+
+print("\n[7] capture_hold service scope")
+
+# CONTRACT.md section 8 rules 8 and 9 / SLICE_CONTRACT.md section 3.
+# place_hold, mint, transfer and set_flag all resolve the caller's service
+# against SERVICE_SCOPES before touching a row. capture_hold did not: any
+# scope-less service that could reach a hold id could debit one wallet, credit
+# another, and stamp the ledger rows with a service name the scope table says
+# has no authority at all -- so the movement is invisible in exactly the record
+# you would use to find it. Default for an unknown/unscoped caller is DENY.
+for bad_service in ("public", "web", "not-a-service", "treasury:games", ""):
+    reset()
+    money.mint("u:victim", 1000, service="owner", reason="seed")
+    money.ensure_wallet("u:thief", service="owner")
+    hid = money.place_hold("u:victim", 300, service="games", reason="bet")
+
+    raises(f"capture_hold refuses service={bad_service!r} (debit only)",
+           money.NotPermitted,
+           money.capture_hold, hid, 100, service=bad_service, reason="theft")
+    raises(f"capture_hold refuses service={bad_service!r} crediting another wallet",
+           money.NotPermitted,
+           money.capture_hold, hid, 100, service=bad_service, reason="theft",
+           to="u:thief")
+
+    with db.db() as c:
+        row = dict(c.execute(
+            "SELECT captured, released, state FROM ledger_holds WHERE id=?",
+            (hid,)).fetchone())
+        rows = c.execute(
+            "SELECT COUNT(*) AS n FROM ledger_entries WHERE service = ?",
+            (bad_service,)).fetchone()["n"]
+    check(f"refused capture ({bad_service!r}) left the hold open and untouched",
+          row == {"captured": 0, "released": 0, "state": "open"}, str(row))
+    check(f"refused capture ({bad_service!r}) wrote no ledger row naming that service",
+          rows == 0, f"{rows} ledger_entries rows attributed to {bad_service!r}")
+    vb, tb = money.balance("u:victim"), money.balance("u:thief")
+    check(f"refused capture ({bad_service!r}) moved neither wallet",
+          vb.coins == 1000 and vb.held == 300 and tb.coins == 0,
+          f"victim={vb.coins}/held {vb.held} thief={tb.coins}")
+
+# an unscoped caller may not launder a debit through `to=` either: a service
+# with HOLD but no TRANSFER must not be able to credit a second wallet.
+# (Every authorised service today holds both, so this asserts the rule, not a
+# current gap: the authorised path still works end to end.)
+reset()
+money.mint("u:victim", 1000, service="owner", reason="seed")
+hid = money.place_hold("u:victim", 300, service="games", reason="bet")
+took = money.capture_hold(hid, 300, service="games", reason="settle",
+                          to="treasury:games")
+check("an authorised service still captures normally after the scope check",
+      took == 300 and money.balance("u:victim").coins == 700
+      and money.balance("treasury:games").coins == 300,
+      f"took={took} victim={money.balance('u:victim').coins} "
+      f"house={money.balance('treasury:games').coins}")
+
 print()
 if FAILS:
     print(f"{len(FAILS)} FAILED: {', '.join(FAILS)}")

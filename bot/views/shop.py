@@ -3,7 +3,7 @@
 "Order this" opens a production/restock order (`core.orders.create_order`) --
 a customer or the owner asking for more of an item to be made, which a
 worker later claims and delivers and a manager pays out on approval. No
-coins move at order-creation time; that only happens at `/orders` approval.
+money moves at order-creation time; that only happens at `/orders` approval.
 """
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from core.pricing import price_label
 
 from . import orders as order_views
 from .pickers import ItemPickerView
-from ..ui.embed import panel_embed, price_line, rows
+from ..ui.embed import money_text, panel_embed, price_line, rows
 
 
 def build_shop_embed() -> discord.Embed:
@@ -86,7 +86,8 @@ class _QuantityModal(discord.ui.Modal):
 
         await interaction.followup.send(
             f"Opened order #{order_id}: {pieces} × {self.item['name']} "
-            f"({quote['price_label']}, worth {quote['total_coins']:,} g at payout). "
+            f"({quote['price_label']}, worth {money_text(quote['total_coins'])} "
+            f"at payout). "
             f"Posted in the orders channel for workers to claim.",
             ephemeral=True,
         )

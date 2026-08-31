@@ -5,31 +5,46 @@ scheme and one settlement path.
 
 Provably fair, in one paragraph
 --------------------------------
-Before a round is played, the house commits to a secret `server_seed` by
-publishing only `sha256(server_seed)` (`game_rounds.server_seed_hash`). The
-seed itself is never written to the row while the round is open -- the CHECK
-constraint on `game_rounds` enforces that a row can only be 'settled' once
-`server_seed` and `outcome_json` both exist. Rather than stash the real secret
-somewhere else for the gap between commit and reveal, it is *derived*
-deterministically from a persistent process secret plus the round id
-(`_server_seed_for`): nobody without that process secret can predict it ahead
-of time, and once it is written into the row at settlement it is a fully
-public value. `verify()` recomputes everything from that public row alone --
-it never touches the process secret -- so anyone can audit a settled round.
+The commitment comes FIRST, before anything about the bet is known. `commit()`
+mints a random `server_seed` (`secrets.token_hex(32)` -- independent of the
+round id, the subject, the game, the selection, the amount and of any process
+secret), stores it in `game_commitments`, and publishes only
+`sha256(server_seed)`. With `conn=None` it commits its own transaction, so the
+hash is durable and readable BEFORE a stake is accepted. A round then binds to
+that commitment (`game_rounds.commitment_id`), copying its hash onto the round
+row; the seed itself is written onto the round only at settlement, which is
+what the `game_rounds` CHECK constraint enforces.
 
-The process secret comes from NOLA_GAME_SEED_SECRET and is validated by
-`configure()` / `_check_seed_secret()` -- refused if missing, if it is the
-placeholder literal that used to ship as this module's default, or if it is
-too short. If the secret a running process derives from no longer matches a
-round's `server_seed_hash` (the process restarted with the env var rotated
-in between commit and reveal, most likely), `settle_round` cannot recover a
-fair outcome for that round -- it voids the round and refunds every open bet
-in full rather than raising and stranding the holds.
+That ordering is the whole property this casino sells. Deriving the seed from
+the round id, as this module used to (`_server_seed_for`, now deleted), meant
+the house could mint round ids until the outcome suited the bet it had already
+seen -- and `verify()` would recompute the same rigged answer and certify it
+VALID, because it checked a commitment derived from the very round it was
+validating. `verify()` now checks the pre-bet artifact: the seed against the
+COMMITMENT row's hash, the round's copy against the commitment, and the
+commitment's `created_at` against the earliest bet on the round.
 
-The outcome itself is `HMAC(server_seed, f"{client_seed}:{nonce}")`: the
-player supplies `client_seed` (so the house alone cannot have pre-selected a
-losing outcome for them), the house supplies `server_seed` (so the player
-alone cannot grind outcomes by resubmitting client seeds).
+The other half is the client seed: it is supplied by the PLAYER, verbatim,
+and there is no server-side default or fallback anywhere in `core/` --
+`open_round` refuses a missing, empty or non-string one. Together with a
+monotonic per-commitment `nonce` (claimed atomically, never reused and never
+rewound), a player can check that a seed they chose produced the outcome they
+were paid on. The house supplies `server_seed` so the player alone cannot
+grind outcomes by resubmitting client seeds.
+
+`NOLA_GAME_SEED_SECRET` is still validated at boot by `configure()` /
+`_check_seed_secret()` (CONTRACT.md sec 11 requires the env var, and
+`open_round` re-checks it so a misdeployed casino refuses to open a round),
+but it no longer derives anything. If a round's commitment row is missing or
+carries no usable seed, `settle_round` voids the round and refunds every open
+bet in full rather than raising and stranding the holds.
+
+Outcomes are drawn by `_uniform_int` -- rejection sampling over 32-bit words
+of `HMAC(server_seed, f"{client_seed}:{nonce}:{counter}")`, with the biased
+tail discarded rather than folded back in with a modulo. `digest[0] % 6` gave
+faces 1-4 a probability of 43/256 and faces 5-6 42/256, so the real dice edge
+was 4.26% on four faces and 6.48% on two while the config said 5%. The edge is
+a config number; it must never be an emergent property of the draw.
 
 House edge -- explicit, not emergent
 -------------------------------------
@@ -85,6 +100,7 @@ import hashlib
 import hmac
 import json
 import os
+import secrets
 import sqlite3
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -228,30 +244,54 @@ def configure() -> None:
     the casino quietly running on the public default until a player notices
     they cannot lose.
 
-    `_server_seed_for` below also calls `_check_seed_secret` on every
-    derivation, so a caller that skips this boot check still cannot get an
-    insecure round played -- but that path only fails at the first bet,
-    which is too late to be the primary signal.
+    `open_round` re-checks the same secret on every round it opens, so a
+    caller that skips this boot check still cannot get a round played on a
+    misdeployed casino -- but that path only fails at the first bet, which is
+    too late to be the primary signal.
+
+    The secret no longer DERIVES anything: server seeds are random
+    (`commit()`). It is kept because CONTRACT.md sec 11 requires the env var
+    and because a process running without it is misconfigured in ways that
+    should stop the casino, not just this module.
     """
     _check_seed_secret(os.environ.get("NOLA_GAME_SEED_SECRET"))
 
 
-def _server_seed_for(round_id: str) -> str:
-    """Deterministic from a persistent process secret + round_id. Never
-    stored anywhere while the round is open -- regenerating it needs the
-    secret; verifying it (after reveal) needs only the public row."""
-    secret = _check_seed_secret(os.environ.get("NOLA_GAME_SEED_SECRET"))
-    return hmac.new(secret.encode(), round_id.encode(), hashlib.sha256).hexdigest()
+def _uniform_int(server_seed: str, client_seed: str, nonce: int, n: int) -> int:
+    """Uniform in [0, n). Rejection sampling: the biased tail is discarded,
+    never folded back in with a modulo.
+
+    `digest[0] % 6` -- what dice used to do -- is not uniform: 256 is not a
+    multiple of 6, so four faces got 43/256 and two got 42/256, moving the
+    real house edge to 4.26%/6.48% against a config that said 5%. Here every
+    32-bit word at or above the largest exact multiple of `n` below 2**32 is
+    thrown away and the next word (then the next digest) is drawn instead, so
+    each of the n outcomes is exactly equally likely.
+    """
+    if not isinstance(n, int) or isinstance(n, bool) or n <= 0:
+        raise ValueError("n must be a positive int")
+    limit = (2 ** 32 // n) * n          # largest exact multiple of n below 2**32
+    counter = 0
+    while True:
+        digest = hmac.new(server_seed.encode(),
+                          f"{client_seed}:{nonce}:{counter}".encode(),
+                          hashlib.sha256).digest()
+        for off in range(0, 32, 4):
+            word = int.from_bytes(digest[off:off + 4], "big")
+            if word < limit:
+                return word % n
+        counter += 1
 
 
 def _outcome(game: str, server_seed: str, client_seed: str, nonce: int) -> dict:
+    """The ONE draw both settlement and verification go through, so they can
+    never disagree about what a round produced."""
     if game not in GAME_CONFIG:
         raise UnknownGame(game)
-    mix = f"{client_seed}:{nonce}".encode()
-    digest = hmac.new(server_seed.encode(), mix, hashlib.sha256).digest()
     if game == "coinflip":
-        return {"face": "heads" if digest[0] % 2 == 0 else "tails"}
-    return {"roll": digest[0] % 6 + 1}  # dice
+        return {"face": "heads" if _uniform_int(server_seed, client_seed, nonce, 2) == 0
+                else "tails"}
+    return {"roll": _uniform_int(server_seed, client_seed, nonce, 6) + 1}  # dice
 
 
 def _wins(game: str, selection: str, outcome: dict) -> bool:
@@ -260,23 +300,131 @@ def _wins(game: str, selection: str, outcome: dict) -> bool:
     return selection == str(outcome["roll"])  # dice
 
 
+# --------------------------------------------------------------- commitments
+
+_COMMITMENTS_DDL = """
+CREATE TABLE IF NOT EXISTS game_commitments (
+    id               TEXT    PRIMARY KEY,
+    server_seed      TEXT    NOT NULL,
+    server_seed_hash TEXT    NOT NULL,
+    next_nonce       INTEGER NOT NULL DEFAULT 0 CHECK (next_nonce >= 0),
+    state            TEXT    NOT NULL DEFAULT 'open'
+                             CHECK (state IN ('open', 'revealed')),
+    created_at       TEXT    NOT NULL DEFAULT (datetime('now')),
+    revealed_at      TEXT
+)
+"""
+
+
+def _ensure_schema(c: sqlite3.Connection) -> None:
+    """Idempotent, content-probed DDL for the commit-first tables.
+
+    The canonical home for both statements is `core/schema.sql`
+    (`game_commitments`) and `core/db.py`'s `_MIGRATIONS`
+    (`game_rounds.commitment_id`), applied by `db.init_db()` at boot. This
+    stays as a belt-and-braces guard for any path that reaches the casino
+    without having run `init_db` first -- a script, a test fixture, a REPL.
+    Both statements are idempotent (`IF NOT EXISTS`; "duplicate column"
+    swallowed exactly as `db._migrate` does), so running them twice is free.
+    """
+    c.execute(_COMMITMENTS_DDL)
+    try:
+        c.execute("ALTER TABLE game_rounds ADD COLUMN commitment_id TEXT")
+    except sqlite3.OperationalError as err:
+        if "duplicate column" not in str(err).lower():
+            raise
+
+
+def commit(subject: str | None = None, *,
+           conn: Optional[sqlite3.Connection] = None) -> dict:
+    """Mint and PUBLISH a commitment, BEFORE any stake is known.
+
+    Returns {"commitment_id", "server_seed_hash", "next_nonce"}. The
+    `server_seed` is `secrets.token_hex(32)` -- random, not derived from the
+    round id, the subject, the bet or the process secret -- and is stored;
+    only its sha256 is ever shown to anyone before settlement. With
+    `conn=None` this commits its own transaction, so the published hash is
+    durable and readable before the player is asked for a stake.
+
+    `subject` is accepted (and recorded nowhere) so a caller can pass who the
+    commitment was published to without the seed depending on it: a seed that
+    depended on the player would be a seed the house could steer.
+    """
+    commitment_id = money.new_event_id("commit")
+    server_seed = secrets.token_hex(32)
+    seed_hash = hashlib.sha256(server_seed.encode()).hexdigest()
+    with db_in(conn) as c:
+        _ensure_schema(c)
+        c.execute(
+            "INSERT INTO game_commitments (id, server_seed, server_seed_hash) "
+            "VALUES (?, ?, ?)",
+            (commitment_id, server_seed, seed_hash),
+        )
+    return {"commitment_id": commitment_id, "server_seed_hash": seed_hash,
+            "next_nonce": 0}
+
+
 # ------------------------------------------------------------------ rounds
 
 def open_round(game: str, client_seed: str, nonce: int = 0, *,
                 round_id: str | None = None,
+                commitment_id: str | None = None,
                 conn: Optional[sqlite3.Connection] = None) -> str:
-    """Commit to a round. `server_seed_hash` is written now; `server_seed`
-    stays NULL until `settle_round` reveals it."""
+    """Bind a round to an already-published commitment.
+
+    `client_seed` is the PLAYER's, verbatim (stripped). There is no
+    server-side default and no server-generated fallback: a missing, empty,
+    whitespace-only or non-string seed is a `ValueError`, because a round
+    whose "player" seed was chosen by the house proves nothing.
+
+    `commitment_id=None` mints one inline via `commit()` -- convenient for
+    tests and for `play()`'s own transaction, but NOT the player path: the
+    player must be shown `server_seed_hash` before staking, which means
+    calling `commit()` first. `nonce` is claimed atomically against the
+    commitment (`next_nonce <= nonce`), so it is never reused and never
+    rewound for one commitment.
+    """
     if game not in GAME_CONFIG:
         raise UnknownGame(game)
+    # Still refuse to open a round on a misdeployed casino (CONTRACT.md 11),
+    # even though the secret no longer derives the seed.
+    _check_seed_secret(os.environ.get("NOLA_GAME_SEED_SECRET"))
+    if not isinstance(client_seed, str):
+        raise ValueError("client_seed must be a non-empty string supplied by the player")
+    client_seed = client_seed.strip()
+    if not client_seed:
+        raise ValueError("client_seed must be a non-empty string supplied by the player")
+    if not isinstance(nonce, int) or isinstance(nonce, bool) or nonce < 0:
+        raise ValueError("nonce must be a non-negative int")
     round_id = round_id or money.new_event_id(f"round.{game}")
-    server_seed = _server_seed_for(round_id)
-    seed_hash = hashlib.sha256(server_seed.encode()).hexdigest()
     with db_in(conn) as c:
+        _ensure_schema(c)
+        if commitment_id is None:
+            commitment_id = commit(conn=c)["commitment_id"]
+        crow = c.execute(
+            "SELECT * FROM game_commitments WHERE id = ?", (commitment_id,)
+        ).fetchone()
+        if crow is None:
+            raise UnknownRound(f"no such commitment {commitment_id}")
+        if crow["state"] != "open":
+            raise RoundNotOpen(
+                f"commitment {commitment_id} is {crow['state']}, not open")
+        claim = c.execute(
+            "UPDATE game_commitments SET next_nonce = ? "
+            "WHERE id = ? AND state = 'open' AND next_nonce <= ?",
+            (nonce + 1, commitment_id, nonce),
+        )
+        if claim.rowcount != 1:
+            raise RoundNotOpen(
+                f"nonce {nonce} is not available on commitment {commitment_id} "
+                f"(a nonce is never reused and never rewound)"
+            )
         c.execute(
-            "INSERT INTO game_rounds (id, game, server_seed_hash, client_seed, nonce) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (round_id, game, seed_hash, client_seed, nonce),
+            "INSERT INTO game_rounds "
+            "(id, game, server_seed_hash, client_seed, nonce, commitment_id) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (round_id, game, crow["server_seed_hash"], client_seed, nonce,
+             commitment_id),
         )
     return round_id
 
@@ -297,6 +445,16 @@ def place_bet(round_id: str, subject: str, selection: str, amount: int, *,
             raise UnknownRound(round_id)
         if row["state"] != "open":
             raise RoundNotOpen(f"round {round_id} is {row['state']}, not open")
+        # A revealed commitment means the seed is public: a bet accepted now
+        # would be a bet on an outcome the bettor could already compute.
+        cid = row["commitment_id"] if "commitment_id" in row.keys() else None
+        if cid is not None:
+            crow = c.execute(
+                "SELECT state FROM game_commitments WHERE id = ?", (cid,)
+            ).fetchone()
+            if crow is not None and crow["state"] != "open":
+                raise RoundNotOpen(
+                    f"commitment {cid} for round {round_id} is already revealed")
 
         game = row["game"]
         cfg = GAME_CONFIG[game]
@@ -412,23 +570,29 @@ def settle_round(round_id: str, *, conn: Optional[sqlite3.Connection] = None) ->
             raise RoundNotOpen(f"round {round_id} was voided")
 
         if row["state"] == "open":
-            server_seed = _server_seed_for(round_id)
-            if hashlib.sha256(server_seed.encode()).hexdigest() != row["server_seed_hash"]:
-                # The seed this process derives right now does not match what
-                # was committed when the round opened -- in practice, an
-                # unpersisted restart with NOLA_GAME_SEED_SECRET rotated in
-                # between. The real seed was never stored while the round was
-                # open (that is the whole point of the commit/reveal scheme),
-                # so there is no way to recover it or compute a fair outcome
-                # any more. The only safe move is to void: refund every open
-                # bet in full and close the round -- a player's hold must
-                # never be stranded waiting on a secret this process cannot
-                # reproduce.
+            # Reveal by READING the committed seed, never by re-deriving one.
+            cid = row["commitment_id"] if "commitment_id" in row.keys() else None
+            crow = None
+            if cid is not None:
+                crow = c.execute(
+                    "SELECT * FROM game_commitments WHERE id = ?", (cid,)
+                ).fetchone()
+            server_seed = crow["server_seed"] if crow is not None else None
+            if not server_seed or (
+                hashlib.sha256(server_seed.encode()).hexdigest() != row["server_seed_hash"]
+            ):
+                # No usable committed seed for this round: the commitment row
+                # is gone, empty, or does not match the hash this round was
+                # opened against. There is no fair outcome to compute and
+                # there never will be -- inventing one now would be exactly
+                # the after-the-fact seed selection this scheme exists to
+                # prevent. Void: refund every open bet in full and close the
+                # round, rather than stranding a player's hold.
                 return _void_round(
                     c, round_id, row["game"],
-                    "server seed no longer matches the round's committed "
-                    "hash (NOLA_GAME_SEED_SECRET changed since this round "
-                    "opened) -- round voided and all open bets refunded",
+                    f"commitment {cid!r} for this round is missing or carries no "
+                    "seed matching the round's published server_seed_hash -- "
+                    "round voided and all open bets refunded",
                 )
             outcome = _outcome(row["game"], server_seed, row["client_seed"], row["nonce"])
             c.execute(
@@ -436,6 +600,11 @@ def settle_round(round_id: str, *, conn: Optional[sqlite3.Connection] = None) ->
                 "state = 'settled', settled_at = datetime('now') "
                 "WHERE id = ? AND state = 'open'",
                 (server_seed, json.dumps(outcome), round_id),
+            )
+            c.execute(
+                "UPDATE game_commitments SET state = 'revealed', "
+                "revealed_at = datetime('now') WHERE id = ? AND state = 'open'",
+                (cid,),
             )
             row = c.execute("SELECT * FROM game_rounds WHERE id = ?", (round_id,)).fetchone()
 
@@ -550,8 +719,13 @@ def settle_round(round_id: str, *, conn: Optional[sqlite3.Connection] = None) ->
 
 
 def play(subject: str, game: str, selection: str, amount: int, client_seed: str,
-         nonce: int = 0) -> dict:
-    """One-shot: commit a round, place a single bet, settle immediately.
+         nonce: int = 0, *, commitment_id: str | None = None) -> dict:
+    """One-shot: bind a round to a commitment, place a single bet, settle.
+
+    `commitment_id` is the commitment the player was SHOWN before staking
+    (see `commit()`), and `client_seed` is the one they typed. Passing no
+    commitment mints one inline, which is fine for a test or a script but is
+    not a player path: nobody saw the hash before the stake.
 
     Coinflip and dice are house games -- there is no external event to wait
     for, so the whole commit/bet/reveal cycle is one atomic transaction. This
@@ -560,31 +734,81 @@ def play(subject: str, game: str, selection: str, amount: int, client_seed: str,
     between steps.
     """
     with db() as c:
-        round_id = open_round(game, client_seed, nonce, conn=c)
+        round_id = open_round(game, client_seed, nonce,
+                              commitment_id=commitment_id, conn=c)
         place_bet(round_id, subject, selection, amount, conn=c)
         return settle_round(round_id, conn=c)
 
 
 def verify(round_id: str, *, conn: Optional[sqlite3.Connection] = None) -> dict:
-    """Recompute a settled round from public values alone. No secret is
-    needed here -- `server_seed` has already been revealed on the row."""
+    """Audit a settled round against the artifact that was published BEFORE
+    the bet -- not against one derived from the round being validated.
+
+    Four independent things have to hold, and `ok` is all four:
+
+      seed_matches_commitment  the revealed seed hashes to the COMMITMENT
+                               row's published hash;
+      commitment_matches_round the round's own copies of hash and seed are
+                               the commitment's;
+      committed_before_bets    the commitment existed no later than the
+                               earliest bet on this round;
+      outcome_matches          the outcome recomputes from those inputs.
+
+    Checking only the last two -- which is all this function used to do,
+    against a hash it could recompute from the round id -- certifies a round
+    the house selected after seeing the bet as VALID. A round with no
+    commitment at all verifies as `ok=False`.
+    """
     with db_in(conn) as c:
         row = c.execute("SELECT * FROM game_rounds WHERE id = ?", (round_id,)).fetchone()
-    if row is None:
-        raise UnknownRound(round_id)
-    if row["state"] != "settled":
-        raise RoundNotOpen(f"round {round_id} is {row['state']}, not settled -- nothing to verify")
+        if row is None:
+            raise UnknownRound(round_id)
+        if row["state"] != "settled":
+            raise RoundNotOpen(
+                f"round {round_id} is {row['state']}, not settled -- nothing to verify")
+        cid = row["commitment_id"] if "commitment_id" in row.keys() else None
+        crow = None
+        if cid is not None:
+            crow = c.execute(
+                "SELECT * FROM game_commitments WHERE id = ?", (cid,)
+            ).fetchone()
+        first_bet = c.execute(
+            "SELECT MIN(placed_at) AS first_at FROM game_bets WHERE round_id = ?",
+            (round_id,),
+        ).fetchone()["first_at"]
 
-    seed_matches = hashlib.sha256(row["server_seed"].encode()).hexdigest() == row["server_seed_hash"]
+    if crow is None:
+        seed_matches = False
+        commitment_matches_round = False
+        committed_before_bets = False
+    else:
+        seed_matches = (
+            hashlib.sha256(crow["server_seed"].encode()).hexdigest()
+            == crow["server_seed_hash"]
+        )
+        commitment_matches_round = (
+            row["server_seed_hash"] == crow["server_seed_hash"]
+            and row["server_seed"] == crow["server_seed"]
+        )
+        # No bets on the round: nothing could have been known in advance.
+        committed_before_bets = (
+            first_bet is None or crow["created_at"] <= first_bet
+        )
+
     recomputed = _outcome(row["game"], row["server_seed"], row["client_seed"], row["nonce"])
     stored = json.loads(row["outcome_json"])
+    outcome_matches = recomputed == stored
 
     return {
         "round_id": round_id,
         "game": row["game"],
+        "commitment_id": cid,
         "seed_matches_commitment": seed_matches,
-        "outcome_matches": recomputed == stored,
-        "ok": seed_matches and recomputed == stored,
+        "commitment_matches_round": commitment_matches_round,
+        "committed_before_bets": committed_before_bets,
+        "outcome_matches": outcome_matches,
+        "ok": bool(seed_matches and commitment_matches_round
+                   and committed_before_bets and outcome_matches),
         "server_seed": row["server_seed"],
         "server_seed_hash": row["server_seed_hash"],
         "client_seed": row["client_seed"],

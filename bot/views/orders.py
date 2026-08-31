@@ -125,6 +125,12 @@ class _PiecesModal(discord.ui.Modal):
         except ValueError:
             await interaction.followup.send("Pieces must be a whole number.", ephemeral=True)
             return
+        if pieces <= 0:
+            await interaction.followup.send(
+                "Pieces must be a positive whole number -- there is nothing to record "
+                "for zero or fewer.", ephemeral=True
+            )
+            return
         try:
             if self.action == "claim":
                 orders_core.claim(self.order_id, self.worker, pieces)
@@ -132,31 +138,41 @@ class _PiecesModal(discord.ui.Modal):
             else:
                 new_status = orders_core.mark_fulfilled(self.order_id, self.worker, pieces)
                 msg = f"Recorded {pieces} pieces delivered on order #{self.order_id} ({new_status})."
-        except orders_core.OrderError as err:
+        # `claim`/`mark_fulfilled` raise plain ValueError (not OrderError) for a
+        # non-positive count, and this runs AFTER the deferral -- letting it
+        # escape here is a silent failure with no message at all.
+        except (orders_core.OrderError, ValueError) as err:
             await interaction.followup.send(f"Could not do that: {err}", ephemeral=True)
             return
         await interaction.followup.send(msg, ephemeral=True)
-        await _refresh_card(interaction, self.order_id)
+        # Key the refresh on the CARD's own stored channel/message, never on
+        # `interaction.message`: reached from the /orders panel that is the
+        # embed-less picker, and refreshing it silently does nothing while the
+        # public board keeps advertising an order somebody already took.
+        channel_id, message_id = _stored_card_ref(self.order_id)
+        await _refresh_card_by_ref(interaction, self.order_id, channel_id, message_id)
 
 
-async def _refresh_card(interaction: discord.Interaction, order_id: int) -> None:
-    """Best-effort: update the channel card in place so it never shows stale
-    status after an action taken from the panel rather than the card.
+def _stored_card_ref(order_id: int) -> tuple[int | None, int | None]:
+    """The public card's OWN (channel_id, message_id), read off the order row.
 
-    Only correct for a SINGLE hop from the real card -- `interaction.message`
-    here is whatever message the action was actually taken on, which is the
-    real card for a modal opened directly off its button, but NOT for an
-    action reached through an intermediate ephemeral message (see
-    `_refresh_card_by_ref` for that case)."""
+    This is the only reference that is correct from every entry point. The
+    old `_refresh_card` keyed on `interaction.message` and was therefore
+    right only for a modal opened directly off the card's own button; from
+    the `/orders` panel `interaction.message` is the embed-less picker, so
+    the refresh matched nothing and the channel board -- the thing most
+    people actually read -- kept reporting `open` on an order that was
+    already claimed, or `awaiting_verification` with a live Approve button on
+    an order that was already paid."""
+    order = queries.get_order_detail(order_id)
+    if order is None:
+        return (None, None)
     try:
-        order = queries.get_order_detail(order_id)
-        if order is None:
-            return
-        if interaction.message is not None and parse_order_id(interaction.message) == order_id:
-            embed = build_order_embed(order_id)
-            await interaction.message.edit(embed=embed, view=order_card_view(order))
-    except discord.HTTPException:
-        pass
+        channel_id = int(order["channel_id"]) if order["channel_id"] else None
+        message_id = int(order["message_id"]) if order["message_id"] else None
+    except (TypeError, ValueError, KeyError):
+        return (None, None)
+    return (channel_id, message_id)
 
 
 async def _refresh_card_by_ref(interaction: discord.Interaction, order_id: int,
@@ -183,6 +199,28 @@ async def _refresh_card_by_ref(interaction: discord.Interaction, order_id: int,
         await message.edit(embed=build_order_embed(order_id), view=order_card_view(order))
     except discord.HTTPException:
         pass
+
+
+
+async def _refresh_from_stored_ref(interaction: discord.Interaction, order_id: int) -> None:
+    """Refresh the public card for an order reached through the panel.
+
+    The card's own channel/message ids are stored on the order row by
+    `set_message`, which is the only reliable source here: this flow arrives
+    via picker -> modal, so `interaction.message` is an ephemeral panel
+    message and refreshing "the message this interaction is on" silently does
+    nothing -- the same defect that left claimed orders showing as open.
+    """
+    order = queries.get_order_detail(order_id)
+    if not order:
+        return
+    channel_id = order.get("channel_id")
+    message_id = order.get("message_id")
+    await _refresh_card_by_ref(
+        interaction, order_id,
+        int(channel_id) if channel_id else None,
+        int(message_id) if message_id else None,
+    )
 
 
 class OrderCardView(discord.ui.View):
@@ -276,8 +314,14 @@ class _ApproveGate(discord.ui.View):
             f"across {result['paid_claims']} claim(s).",
             ephemeral=True,
         )
+        # Prefer the card's own stored reference over wherever this gate was
+        # opened from: the approve-queue picker in `/orders` carries no origin
+        # at all, so keying on the origin alone left a paid, fulfilled order
+        # printed as awaiting_verification with a LIVE Approve button.
+        channel_id, message_id = _stored_card_ref(self.order_id)
         await _refresh_card_by_ref(interaction, self.order_id,
-                                    self.origin_channel_id, self.origin_message_id)
+                                    channel_id if channel_id is not None else self.origin_channel_id,
+                                    message_id if message_id is not None else self.origin_message_id)
 
 
 class OrdersPanelView(discord.ui.View):
@@ -374,6 +418,168 @@ class OrdersPanelView(discord.ui.View):
             "Pick an order to approve:",
             view=OptionPickerView(self.owner_id, options, picked, placeholder="Choose an order..."),
             ephemeral=True,
+        )
+
+    @discord.ui.button(label="Stuck order", style=discord.ButtonStyle.secondary)
+    async def stuck_order(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        """Every non-closed order must have a reachable exit -- pay or void.
+        Without this button `orders.cancel` and `orders.reprice` existed with
+        no caller at all, and an order whose price snapshot was 0 could never
+        be approved, never be cancelled, and held its pieces claimed forever."""
+        if not is_staff(interaction.user, self.config):
+            await interaction.response.send_message(
+                "Repairing orders is staff-only.", ephemeral=True
+            )
+            return
+        stuck = queries.list_orders(("open", "claimed", "awaiting_verification"))
+        options = [
+            (f"#{o['id']} {o['item_name']} {SEP} {o['status']} "
+             f"{SEP} {o['produced_pieces']}/{o['requested_pieces']}", str(o["id"]))
+            for o in stuck
+        ]
+
+        async def picked(inter: discord.Interaction, order_id_str: str) -> None:
+            if order_id_str == "_none":
+                await inter.response.send_message("No open orders.", ephemeral=True)
+                return
+            order = queries.get_order_detail(int(order_id_str))
+            label = price_label(order["price_coins"], order["price_unit_pieces"],
+                                order["stack_size"])
+            warn = ""
+            if not order["price_coins"]:
+                warn = ("\n\n**This order has a zero price snapshot.** Approving it raises "
+                        "rather than paying zero, so it must be repriced or cancelled.")
+            await inter.response.send_message(
+                f"Order #{order['id']} {SEP} {order['item_name']} {SEP} {order['status']}\n"
+                f"Delivered {order['produced_pieces']} of {order['requested_pieces']} pieces "
+                f"at {label}.{warn}",
+                view=_StuckOrderView(order["id"], self.owner_id, self.config),
+                ephemeral=True,
+            )
+
+        from .pickers import OptionPickerView
+        await interaction.response.send_message(
+            "Pick an order to repair or cancel:",
+            view=OptionPickerView(self.owner_id, options, picked,
+                                  placeholder="Choose an order..."),
+            ephemeral=True,
+        )
+
+
+
+class _RepriceModal(discord.ui.Modal):
+    """Repair a stuck order's price snapshot so it can actually be paid.
+
+    Free text is correct here: these are quantities the owner types, not an
+    identity. The order itself was already chosen from a picker, and its id
+    is carried on this modal rather than asked for.
+    """
+
+    def __init__(self, order_id: int, actor: str, current_coins: int, current_unit: int) -> None:
+        super().__init__(title=f"Reprice order #{order_id}")
+        self.order_id = order_id
+        self.actor = actor
+        self.price = discord.ui.TextInput(
+            label="Gold per unit", default=str(current_coins), max_length=12,
+        )
+        self.unit = discord.ui.TextInput(
+            label="Pieces that price buys", default=str(current_unit), max_length=6,
+        )
+        self.add_item(self.price)
+        self.add_item(self.unit)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        try:
+            coins = int(str(self.price.value).strip())
+            unit = int(str(self.unit.value).strip())
+        except ValueError:
+            await interaction.followup.send("Both values must be whole numbers.", ephemeral=True)
+            return
+        try:
+            order = orders_core.reprice(self.order_id, coins, unit, actor=self.actor)
+        except orders_core.OrderError as err:
+            await interaction.followup.send(f"Could not reprice: {err}", ephemeral=True)
+            return
+        label = price_label(order["price_coins"], order["price_unit_pieces"], order["stack_size"])
+        await interaction.followup.send(
+            f"Order #{self.order_id} repriced to {label}. It can be approved now.",
+            ephemeral=True,
+        )
+        await _refresh_from_stored_ref(interaction, self.order_id)
+
+
+class _CancelOrderModal(discord.ui.Modal):
+    """Cancelling never moves money, but it CLOSES an order somebody may have
+    delivered real work against -- so the reason is recorded on the audit row
+    alongside any unpaid claim as a debt a human can settle deliberately."""
+
+    def __init__(self, order_id: int, actor: str) -> None:
+        super().__init__(title=f"Cancel order #{order_id}")
+        self.order_id = order_id
+        self.actor = actor
+        self.reason = discord.ui.TextInput(
+            label="Why is this being cancelled?",
+            style=discord.TextStyle.paragraph, max_length=300, required=True,
+        )
+        self.add_item(self.reason)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        try:
+            orders_core.cancel(self.order_id, actor=self.actor,
+                               reason=str(self.reason.value).strip())
+        except orders_core.OrderError as err:
+            await interaction.followup.send(f"Could not cancel: {err}", ephemeral=True)
+            return
+        await interaction.followup.send(
+            f"Order #{self.order_id} cancelled. Any delivered-but-unpaid work is on the "
+            f"audit row as a debt to settle.",
+            ephemeral=True,
+        )
+        await _refresh_from_stored_ref(interaction, self.order_id)
+
+
+class _StuckOrderView(discord.ui.View):
+    """The two exits every non-closed order must have: pay it, or void it.
+
+    CONTRACT.md section 8 rule 11 makes a zero price a LOUD failure at payout
+    rather than a silent zero-coin payment -- which is right, and which is
+    exactly how an order becomes unpayable. Repricing repairs the snapshot so
+    approve() can run; cancelling closes it and records the unpaid work. With
+    neither reachable, delivered labour was simply lost.
+    """
+
+    def __init__(self, order_id: int, owner_id: int, config) -> None:
+        super().__init__(timeout=180)
+        self.order_id = order_id
+        self.owner_id = owner_id
+        self.config = config
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        # Re-checked per click, never inferred from who opened the panel.
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("This panel isn't yours.", ephemeral=True)
+            return False
+        if not is_staff(interaction.user, self.config):
+            await interaction.response.send_message(
+                "Repairing orders is staff-only.", ephemeral=True
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="Reprice, then approve", style=discord.ButtonStyle.primary)
+    async def reprice_btn(self, interaction: discord.Interaction, _b: discord.ui.Button) -> None:
+        order = queries.get_order_detail(self.order_id)
+        await interaction.response.send_modal(
+            _RepriceModal(self.order_id, money.user(interaction.user.id),
+                          order["price_coins"], order["price_unit_pieces"])
+        )
+
+    @discord.ui.button(label="Cancel this order", style=discord.ButtonStyle.danger)
+    async def cancel_btn(self, interaction: discord.Interaction, _b: discord.ui.Button) -> None:
+        await interaction.response.send_modal(
+            _CancelOrderModal(self.order_id, money.user(interaction.user.id))
         )
 
 

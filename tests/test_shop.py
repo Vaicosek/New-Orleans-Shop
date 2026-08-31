@@ -356,6 +356,105 @@ for _price in _AWKWARD_PRICES:
         check(f"price={_price} split={_split_name}: no individual claim payout went negative",
               all((cl["paid_coins"] or 0) >= 0 for cl in orders.list_claims(_order_id)))
 
+
+# ------------------------------------------------------------------ REGRESSION: the 64x split is actually exercised
+# CONTRACT.md section 5's rounding table, as explicit cases, plus a fixture whose
+# price_unit_pieces != stack_size. Before this block every fixture in this file
+# passed price_unit_pieces = stack_size (see make_item), so the ONE case the
+# split exists for was untested: swapping charge()'s divisor from
+# price_unit_pieces to stack_size would have priced saplings at half and left
+# the whole suite green.
+print("\nREGRESSION: CONTRACT.md section 5 rounding table, in full")
+
+check("charge(64, 300, 64) is one full stack at the quoted price",
+      charge(64, 300, 64) == 300, f"got {charge(64, 300, 64)}")
+check("charge(1, 300, 64) rounds 4.6875 half-up to 5",
+      charge(1, 300, 64) == 5, f"got {charge(1, 300, 64)}")
+check("charge(32, 300, 64) is exactly 150, no rounding",
+      charge(32, 300, 64) == 150, f"got {charge(32, 300, 64)}")
+check("charge(0, 300) is 0", charge(0, 300) == 0, f"got {charge(0, 300)}")
+check("charge() defaults unit_pieces to STACK (64)",
+      charge(1, 300) == charge(1, 300, 64) == 5)
+
+# The worked example from CONTRACT.md section 5. This is THE case the two-column
+# split exists to make impossible, and it is the assertion that discriminates:
+# a divisor swapped to stack_size gives 1 here, not 2.
+check("WORKED EXAMPLE: charge(64, 1, 32) == 2 -- a full 64-piece stack of "
+      "saplings quoted at 1 g per 32 costs TWO gold",
+      charge(64, 1, 32) == 2, f"got {charge(64, 1, 32)} -- the divisor is wrong")
+check("...and charge(64, 1, 64) == 1, so the two divisors give DIFFERENT "
+      "answers -- this test cannot pass with stack_size as the divisor",
+      charge(64, 1, 64) == 1 and charge(64, 1, 32) != charge(64, 1, 64),
+      f"32-divisor={charge(64, 1, 32)} 64-divisor={charge(64, 1, 64)}")
+check("charge(32, 1, 32) == 1 -- exactly one quoted unit",
+      charge(32, 1, 32) == 1, f"got {charge(32, 1, 32)}")
+check("charge(1, 1, 32) == 0 -- 0.03 g rounds half-up to nothing",
+      charge(1, 1, 32) == 0, f"got {charge(1, 1, 32)}")
+
+# ------------------------------------------------------------------ sapling fixture: price_unit_pieces != stack_size
+print("\nREGRESSION: a sapling fixture (1 g / 32, stacks to 64) drives the "
+      "price path and the capacity path apart")
+reset()
+seed_treasury()
+
+# barrel_slots=1 so capacity discriminates too: 1 * 64 = 64, never 1 * 32 = 32.
+sapling = catalog.add_item("Sapling", 1, price_unit_pieces=32, stack_size=64,
+                           barrel_slots=1)
+sap = catalog.get_item(sapling)
+check("the item stores both numbers separately, verbatim",
+      sap["price_coins"] == 1 and sap["price_unit_pieces"] == 32
+      and sap["stack_size"] == 64,
+      f"got {sap['price_coins']}/{sap['price_unit_pieces']}/{sap['stack_size']}")
+
+check("capacity is barrel_slots * STACK_SIZE (64), never * price_unit_pieces (32)",
+      catalog.capacity_of(sapling) == 64, f"got {catalog.capacity_of(sapling)}")
+
+check("quote divides by price_unit_pieces: 64 pieces cost 2 g, not 1",
+      catalog.quote(sapling, 64)["total_coins"] == 2,
+      f"got {catalog.quote(sapling, 64)['total_coins']}")
+check("quote for 32 pieces is exactly 1 g",
+      catalog.quote(sapling, 32)["total_coins"] == 1,
+      f"got {catalog.quote(sapling, 32)['total_coins']}")
+check("quote's label names the quoted unit as 32, not 'stack of 64'",
+      "/ 32" in catalog.quote(sapling, 64)["price_label"]
+      and "stack of" not in catalog.quote(sapling, 64)["price_label"],
+      catalog.quote(sapling, 64)["price_label"])
+
+# ...and the same divisor all the way through the order lifecycle.
+sap_order = orders.create_order(sapling, 64, created_by="u:owner")
+_snap = orders.get_order(sap_order)
+check("create_order snapshots BOTH numbers, not one of them twice",
+      _snap["price_unit_pieces"] == 32 and _snap["stack_size"] == 64,
+      f"got unit={_snap['price_unit_pieces']} stack={_snap['stack_size']}")
+
+orders.claim(sap_order, "u:sapworker", 64)
+orders.mark_fulfilled(sap_order, "u:sapworker", 64)
+_sap_result = orders.approve(sap_order, "u:manager")
+check("approve pays 2 g for a full 64-piece sapling stack -- halving it to 1 "
+      "is the exact bug the price/stack split exists to prevent",
+      _sap_result["paid_coins"] == 2, f"got {_sap_result['paid_coins']}")
+check("the worker was really credited 2, not 1",
+      money.balance("u:sapworker").coins == 2,
+      f"got {money.balance('u:sapworker').coins}")
+
+# split_charge must telescope against price_unit_pieces too, not stack_size.
+sap2 = catalog.add_item("Sapling (split)", 1, price_unit_pieces=32,
+                        stack_size=64, barrel_slots=54)
+for _name, _pieces in {"1x64": [64], "2x32": [32, 32], "64x1": [1] * 64,
+                       "3+61": [3, 61]}.items():
+    _oid = orders.create_order(sap2, 64, created_by="u:owner")
+    _ws = [f"u:sap_{_name}_{_i}" for _i in range(len(_pieces))]
+    for _w, _p in zip(_ws, _pieces):
+        orders.claim(_oid, _w, _p)
+    for _w, _p in zip(_ws, _pieces):
+        orders.mark_fulfilled(_oid, _w, _p)
+    _r = orders.approve(_oid, "u:manager")
+    check(f"sapling split={_name} pays exactly charge(64, 1, 32) = 2",
+          _r["paid_coins"] == 2, f"got {_r['paid_coins']} pieces={_pieces}")
+
+raises("price_unit_pieces may never exceed stack_size", ValueError,
+       catalog.add_item, "Bad Unit", 1, price_unit_pieces=128, stack_size=64)
+
 print()
 if FAILS:
     print(f"{len(FAILS)} FAILED: {', '.join(FAILS)}")

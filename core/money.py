@@ -391,7 +391,18 @@ def capture_hold(hold_id: str, amount: int | None = None, *, service: str,
     Order matters: the hold shrinks FIRST, which raises the subject's available
     balance by exactly the captured amount, and only then does the debit run
     through the same guard every other debit uses. One guard, no special case.
+
+    `service` is the caller's authority and is checked BEFORE the hold row is
+    touched, exactly as place_hold does it -- a capture is a debit, and
+    crediting `to` is additionally a transfer. _require_scope default-denies
+    (SERVICE_SCOPES.get(service, frozenset())), so an unknown or unscoped
+    caller is refused rather than allowed. Without this a scope-less service
+    that could reach a hold id could move coins and stamp the ledger with a
+    service the scope table says has no authority at all.
     """
+    _require_scope(service, HOLD)
+    if to is not None:
+        _require_scope(service, TRANSFER)   # crediting another wallet is a transfer
     with db_in(conn) as c:
         hold = _open_hold(c, hold_id)
         remaining = int(hold["amount"]) - int(hold["captured"]) - int(hold["released"])

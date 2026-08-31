@@ -13,13 +13,23 @@ past every limit a coinflip enforced).
 `money.GAMBLING_SERVICES` is gated there) and is deliberately NOT duplicated
 here -- this module only ever runs before that hold is placed.
 
-Exposure is tracked PER KIND on purpose. `gambling_day.lost` (realised loss)
-is shared across both kinds: once a wager of EITHER kind settles as a loss it
-counts against the same wallet-wide MAX_DAILY_LOSS, which is the whole point
-of one cap. But *open, unsettled* exposure is scoped to the kind being
-checked -- an open prediction stake is not casino risk and must never lock a
-subject out of coinflip/dice (and vice-versa); it will count once, correctly,
-when it actually settles and lands in `gambling_day` via `record_loss`.
+Exposure is WALLET-WIDE, not per kind. CONTRACT.md section 9 lists
+MAX_DAILY_LOSS as ONE guardrail "enforced server-side at hold time", and a
+loss of either kind lands in the same `gambling_day.lost` row: once a wager
+of EITHER kind settles as a loss it counts against the same wallet-wide
+MAX_DAILY_LOSS, which is the whole point of one cap. Open, unsettled
+exposure has to be counted the same way. Bucketing it per kind was a real
+bypass: a player ran casino bets and prediction stakes side by side and put
+roughly 2x MAX_DAILY_LOSS at risk on one day -- ~40,000 against a 20,000
+cap -- with every individual wager passing the check. A limit that reports
+itself as enforced while being silently doubled is worse than no limit, so
+there is exactly one bucket here now.
+
+The check MUST run inside the very transaction that goes on to place the
+hold (`db.db_in()` -> `BEGIN IMMEDIATE`, one SQLite writer lock). Both
+callers already do that: two concurrent stakes cannot both read the same
+"before" exposure and both slip a hold in underneath it -- the second waits
+for the first to commit and then reads the updated total.
 """
 from __future__ import annotations
 
@@ -47,15 +57,24 @@ class AccountTooNew(WageringError):
     pass
 
 
-# Which open-position table counts as "exposure" for each wager kind. Joining
-# against the kind's own bet/stake table (rather than trusting a shared
-# ledger_holds.service string) is what keeps the two kinds from bleeding into
-# each other even though both currently hold under the same money-service
+# The set of wager kinds `check_wager` will answer for. It selects the
+# wording of the refusal and NOTHING else -- exposure is one wallet-wide
+# bucket across every kind (see the module docstring).
+_KINDS = frozenset({"games", "predictions"})
+
+# Every open wager hold this subject owns, of any kind. Joining against the
+# bet/stake tables (rather than trusting `ledger_holds.service`) keeps shop
+# and order holds out of the wagering budget while still counting BOTH
+# casino bets and prediction stakes, which currently share one money-service
 # scope ("games").
-_EXPOSURE_JOIN = {
-    "games": "JOIN game_bets b ON b.hold_id = h.id",
-    "predictions": "JOIN pred_stakes s ON s.hold_id = h.id",
-}
+_EXPOSURE_SQL = (
+    "SELECT COALESCE(SUM(h.amount - h.captured - h.released), 0) AS exposure "
+    "  FROM ledger_holds h "
+    " WHERE h.subject = ? AND h.state = 'open' "
+    "   AND h.id IN (SELECT hold_id FROM game_bets "
+    "                UNION ALL "
+    "                SELECT hold_id FROM pred_stakes)"
+)
 
 
 def today() -> str:
@@ -80,16 +99,19 @@ def account_age_days(conn: sqlite3.Connection, subject: str) -> int:
 def check_wager(conn: sqlite3.Connection, subject: str, amount: int, *,
                  kind: str, service: str = "games") -> None:
     """Refuse `amount` for `subject` if it violates account age, MAX_BET, or
-    MAX_DAILY_LOSS. MUST run in the SAME transaction that goes on to place
-    the hold (see the exposure comment below for why) -- callers pass the
-    connection they are about to call `money.place_hold` with.
+    the ONE wallet-wide MAX_DAILY_LOSS.
 
-    `kind` picks which open-position table counts toward exposure: 'games'
-    for coinflip/dice, 'predictions' for pari-mutuel stakes. `service` is the
-    `ledger_holds.service` value those holds were placed under (both kinds
-    currently share "games").
+    MUST run in the SAME transaction that goes on to place the hold --
+    callers pass the connection they are about to call `money.place_hold`
+    with, so the exposure read and the hold INSERT are atomic together and
+    two concurrent stakes cannot both pass.
+
+    `kind` must be 'games' or 'predictions'. It selects the wording of the
+    refusal and nothing else. `service` is IGNORED for scoping -- it is kept
+    only so the existing call sites keep compiling; exposure is summed over
+    every open wager hold this subject owns, of every kind.
     """
-    if kind not in _EXPOSURE_JOIN:
+    if kind not in _KINDS:
         raise ValueError(f"unknown wagering kind {kind!r}")
     if not isinstance(amount, int) or isinstance(amount, bool) or amount <= 0:
         raise ValueError("amount must be a positive int")
@@ -108,32 +130,20 @@ def check_wager(conn: sqlite3.Connection, subject: str, amount: int, *,
     ).fetchone()
     lost_so_far = int(loss_row["lost"]) if loss_row else 0
 
-    # gambling_day.lost only grows when a wager SETTLES. Without also
-    # counting what is currently at risk in this subject's OWN open `kind`
-    # positions, a player could open many wagers of the same kind and stack
-    # up to MAX_BET in each before settling any -- none of it visible to the
-    # cap until too late. This read and the hold INSERT that follows (in the
-    # caller) run inside the SAME transaction (db_in()'s BEGIN IMMEDIATE) --
-    # a single SQLite writer lock -- so a concurrent check_wager() for the
-    # same subject cannot read this same "before" exposure and also slip its
-    # own hold in underneath this one; it simply waits for this transaction
-    # to commit (or roll back) and then reads the updated total.
-    join = _EXPOSURE_JOIN[kind]
-    exposure_row = conn.execute(
-        f"SELECT COALESCE(SUM(h.amount - h.captured - h.released), 0) AS exposure "
-        f"FROM ledger_holds h {join} "
-        f"WHERE h.subject = ? AND h.service = ? AND h.state = 'open'",
-        (subject, service),
-    ).fetchone()
+    # gambling_day.lost only grows when a wager SETTLES, so what is currently
+    # at risk in this subject's open positions has to be counted too -- across
+    # BOTH kinds, or the cap is simply doubled by playing two games at once.
+    exposure_row = conn.execute(_EXPOSURE_SQL, (subject,)).fetchone()
     open_exposure = int(exposure_row["exposure"])
 
     at_risk = lost_so_far + open_exposure + amount
     if at_risk > MAX_DAILY_LOSS:
         raise DailyLossExceeded(
             f"{subject} would have {at_risk:,} at risk today ({lost_so_far:,} "
-            f"already realized + {open_exposure:,} in other open {kind} "
-            f"positions + {amount:,} this wager); MAX_DAILY_LOSS is "
-            f"{MAX_DAILY_LOSS:,}"
+            f"already realized + {open_exposure:,} across all open wager "
+            f"positions, casino and predictions together + {amount:,} this "
+            f"{kind} wager); MAX_DAILY_LOSS is {MAX_DAILY_LOSS:,} and it is "
+            f"one wallet-wide cap, not one per wager kind"
         )
 
 

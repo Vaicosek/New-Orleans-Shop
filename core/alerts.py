@@ -27,6 +27,7 @@ from __future__ import annotations
 import sqlite3
 from typing import Any, Optional
 
+from . import audit
 from .db import db_in
 
 
@@ -127,10 +128,31 @@ def due(*, conn: Optional[sqlite3.Connection] = None) -> list[dict[str, Any]]:
         return result
 
 
-def acknowledge(item_id: int, *, conn: Optional[sqlite3.Connection] = None) -> None:
-    """Silence the alert for `item_id` at its CURRENT quantity. The alert
-    will speak again only if stock drops below this quantity, or stays
-    quiet forever if stock never gets worse than this moment.
+def acknowledge(item_id: int, *, actor: str = "system",
+                 conn: Optional[sqlite3.Connection] = None) -> int:
+    """Silence the alert for `item_id` at its CURRENT quantity, and return the
+    value actually written.
+
+    The value written is the CURRENT quantity, verbatim -- including zero.
+
+    It was briefly floored at 1, on the reasoning that storing 0 would silence
+    the loudest possible situation forever. That reasoning is wrong twice.
+    Nothing is permanent: `due()` clears `acked_until_qty` back to NULL the
+    moment stock returns to or above threshold, so an ack at 0 lasts exactly
+    until the next restock. And the floor did not make the alarm safer, it made
+    the ack a no-op -- `due()` fires on `qty < acked_until_qty`, so a stored 1
+    against a real quantity of 0 satisfies `0 < 1` and the alert re-fires on
+    every single scan, forever. That is verbatim the AbexTech repeating-DM bug
+    CONTRACT.md section 6 exists to kill, reintroduced by the guard meant to
+    prevent a different one.
+
+    So: acknowledging at 0 stock is a real acknowledgement. It goes quiet, and
+    it speaks again when the item is restocked and later dips again -- which is
+    what section 6 specifies, and the reset in `due()` is what makes it safe.
+
+    One `audit_actions` row (kind='alert.ack') is written in the SAME
+    transaction as the update, naming `actor` -- silencing a restock alarm is
+    an action somebody took, and it was previously untraceable.
     """
     with db_in(conn) as c:
         row = c.execute(
@@ -145,8 +167,16 @@ def acknowledge(item_id: int, *, conn: Optional[sqlite3.Connection] = None) -> N
                 raise NoSuchItem(f"no such item {item_id}")
             raise NoThreshold(f"item {item_id} has no restock threshold configured")
 
+        acked_until_qty = int(row["pieces"])
         c.execute(
             "UPDATE stock_alerts SET acked_until_qty = :q, last_fired_at = datetime('now') "
             " WHERE item_id = :id",
-            {"q": row["pieces"], "id": item_id},
+            {"q": acked_until_qty, "id": item_id},
         )
+        audit.record(
+            c, actor=actor, target=f"item:{item_id}", kind="alert.ack",
+            summary=(f"restock alert acknowledged at {row['pieces']} in stock "
+                     f"(silenced until below {acked_until_qty})"),
+            ops=[], money_coins=0,
+        )
+        return acked_until_qty

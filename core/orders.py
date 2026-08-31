@@ -13,7 +13,11 @@ gets no exemption from those rules:
   that already won.
 - a zero or missing price is a loud failure at payout, never a silent
   zero-coin payment -- a corrupted snapshot must never look like a
-  successful payout.
+  successful payout (`ZeroPrice`, and `ZeroPayout` for an order whose whole
+  payout telescopes to 0).
+- every non-closed order has at least one reachable terminal transition:
+  pay (`approve`, after `reprice` if the snapshot needs repairing) or void
+  (`cancel`, allowed from `awaiting_verification`). Never neither.
 - `order_claims.paid_event` (UNIQUE) is set inside the SAME UPDATE that
   decides to pay a claim, which is the actual double-pay guard; `approve()`
   merely respects it rather than re-implementing it.
@@ -63,6 +67,22 @@ class OverDelivery(OrderError):
 
 class ZeroPrice(OrderError):
     """The order's snapshotted price is zero or missing. Refuse, never pay 0."""
+
+
+class ZeroPayout(OrderError):
+    """Real work was delivered but the WHOLE order's payout computes to 0.
+
+    CONTRACT.md sec 8 rule 11: a missing or zero price is a LOUD failure at
+    payout, never a silent zero-coin payment. `ZeroPrice` catches a zero
+    snapshot price; this catches the other way of arriving at nothing -- a
+    non-zero price so small, against so few pieces, that `split_charge`
+    telescopes the entire order to 0. Paying nobody and then closing the
+    order permanently is indistinguishable, in the ledger, from a successful
+    payout; the worker's delivered labour simply vanishes. Raising leaves the
+    order in `awaiting_verification`, where staff can `reprice()` it or
+    `cancel()` it. A per-claim 0 inside a non-zero total is NOT this error --
+    that is legitimate rounding and is skipped, not raised.
+    """
 
 
 class SelfApproval(OrderError):
@@ -243,18 +263,157 @@ def mark_fulfilled(order_id: int, worker: str, delivered_pieces: int, *,
         return new_status
 
 
-def cancel(order_id: int, *, conn: Optional[sqlite3.Connection] = None) -> None:
-    """Cancel an order. Only possible before delivery is verified -- an order
-    already `awaiting_verification` or `fulfilled` has real work or a real
-    payout riding on it and must not vanish silently."""
+def cancel(order_id: int, *, actor: str = "system", reason: str | None = None,
+           conn: Optional[sqlite3.Connection] = None) -> None:
+    """Cancel an order. Allowed from 'open', 'claimed' AND
+    'awaiting_verification'; refused from 'fulfilled' and 'cancelled'.
+
+    WHY 'awaiting_verification' IS ALLOWED -- the order dead end. This used to
+    stop at ('open', 'claimed') on the reasoning that a delivered order "has
+    real work riding on it and must not vanish silently". The effect was the
+    opposite of that intent: an order whose price snapshot is 0 (or whose
+    whole payout rounds to 0) raises `ZeroPrice`/`ZeroPayout` from
+    `approve()` forever, and with cancel refused as well the order had NO
+    reachable terminal transition at all. The delivered labour was lost
+    anyway, the approval queue filled with zombies staff could not clear, and
+    the pieces stayed claimed so nobody else could take the order either.
+
+    The invariant is: FOR EVERY NON-CLOSED ORDER THERE IS AT LEAST ONE
+    REACHABLE TERMINAL TRANSITION -- pay (`approve`, after `reprice` if the
+    snapshot needs repairing) or void (`cancel`). Never neither.
+
+    Cancelling never moves money. Work that was delivered and never paid is
+    recorded on the audit row as a `manual_coins` debt with one op per unpaid
+    claim, in the SAME transaction as the status change, so a human can settle
+    it deliberately instead of it disappearing without trace.
+    """
+    actor = normalise_subject(actor)
     with db_in(conn) as c:
         cur = c.execute(
             "UPDATE orders SET status = 'cancelled', closed_at = datetime('now') "
-            " WHERE id = ? AND status IN ('open', 'claimed')",
+            " WHERE id = ? AND status IN ('open', 'claimed', 'awaiting_verification')",
             (order_id,),
         )
         if cur.rowcount != 1:
-            raise NotClaimable(f"order {order_id} cannot be cancelled from its current state")
+            row = c.execute("SELECT status FROM orders WHERE id = ?",
+                            (order_id,)).fetchone()
+            if row is None:
+                raise NoSuchOrder(f"no such order {order_id}")
+            raise NotClaimable(
+                f"order {order_id} is {row['status']}; a closed order cannot be cancelled"
+            )
+
+        order = c.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
+        claims = c.execute(
+            "SELECT * FROM order_claims WHERE order_id = ? ORDER BY claimed_at, id",
+            (order_id,),
+        ).fetchall()
+
+        # Same ordering and same splitter approve() would have used, so the
+        # figure a human is asked to settle is the figure the order would have
+        # paid. A zero/absent snapshot price simply owes 0 -- the pieces are
+        # still listed, which is the point of the row.
+        price = order["price_coins"]
+        unit_pieces = order["price_unit_pieces"]
+        if price and price > 0:
+            owed = split_charge([cl["delivered"] for cl in claims], price, unit_pieces)
+        else:
+            owed = [0] * len(claims)
+
+        ops: list[dict] = []
+        manual_total = 0
+        for cl, amount in zip(claims, owed):
+            if cl["paid_event"] is not None or cl["delivered"] <= 0:
+                continue
+            worker = normalise_subject(cl["worker"])
+            ops.append({
+                "op": "manual",
+                "worker": worker,
+                "delivered_pieces": cl["delivered"],
+                "amount": amount,
+                "note": (f"delivered {cl['delivered']} piece(s) on cancelled order "
+                         f"{order_id}, never paid -- settle by hand"),
+            })
+            manual_total += amount
+
+        summary = f"cancelled order {order_id}"
+        if reason:
+            summary += f": {reason}"
+        if ops:
+            summary += (f" -- {len(ops)} unpaid delivered claim(s) owing "
+                        f"{manual_total:,} {CURRENCY} by hand")
+        audit.record(
+            c, actor=actor, target=f"order:{order_id}", kind="order.cancel",
+            summary=summary, ops=ops, money_coins=0, manual_coins=manual_total,
+        )
+
+
+def reprice(order_id: int, price_coins: int, price_unit_pieces: int | None = None,
+            *, actor: str, conn: Optional[sqlite3.Connection] = None) -> dict[str, Any]:
+    """Repair an order's PRICE SNAPSHOT so a stuck order can actually be paid.
+
+    The snapshot is deliberately immutable against the item's live columns
+    (see `create_order`) -- but that also means a snapshot taken while the
+    item was mispriced, or priced at 0, can never be corrected, and the
+    delivered order can never be approved. This is the deliberate staff
+    repair: it changes the price the order will pay, and NOTHING else. It
+    never moves money, never touches claims, never closes the order.
+
+    Refused once the order is 'fulfilled' or 'cancelled' -- a paid order is
+    never repriced, because the money is already out the door. `price_coins`
+    must be a POSITIVE int (repricing to 0 would re-create the dead end this
+    function exists to clear); `price_unit_pieces` defaults to the order's
+    current value, must be positive, and must not exceed the order's
+    `stack_size` -- the same rule `catalog.add_item` and the schema CHECK
+    enforce for items.
+    """
+    price_coins = _positive_int(price_coins, "price_coins")
+    if price_unit_pieces is not None:
+        price_unit_pieces = _positive_int(price_unit_pieces, "price_unit_pieces")
+    actor = normalise_subject(actor)
+    with db_in(conn) as c:
+        order = c.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
+        if order is None:
+            raise NoSuchOrder(f"no such order {order_id}")
+        if order["status"] in ("fulfilled", "cancelled"):
+            raise NotClaimable(
+                f"order {order_id} is {order['status']}; a closed order is never repriced"
+            )
+        unit_pieces = (order["price_unit_pieces"] if price_unit_pieces is None
+                       else price_unit_pieces)
+        if unit_pieces > order["stack_size"]:
+            raise ValueError("price_unit_pieces must not exceed stack_size")
+
+        before_price = order["price_coins"]
+        before_unit = order["price_unit_pieces"]
+        cur = c.execute(
+            "UPDATE orders SET price_coins = :p, price_unit_pieces = :u "
+            " WHERE id = :oid AND status NOT IN ('fulfilled', 'cancelled')",
+            {"p": price_coins, "u": unit_pieces, "oid": order_id},
+        )
+        if cur.rowcount != 1:                       # closed underneath us
+            raise NotClaimable(
+                f"order {order_id} was closed before the reprice could be applied"
+            )
+
+        audit.record(
+            c, actor=actor, target=f"order:{order_id}", kind="order.reprice",
+            summary=(
+                f"repriced order {order_id} from {before_price:,} {CURRENCY} "
+                f"per {before_unit} piece(s) to {price_coins:,} {CURRENCY} "
+                f"per {unit_pieces} piece(s)"
+            ),
+            ops=[{
+                "op": "reprice",
+                "before": {"price_coins": before_price, "price_unit_pieces": before_unit},
+                "after": {"price_coins": price_coins, "price_unit_pieces": unit_pieces},
+                "reverse": {"op": "reprice", "price_coins": before_price,
+                            "price_unit_pieces": before_unit},
+            }],
+            money_coins=0, manual_coins=0,
+        )
+        row = c.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
+        return _row(row)
 
 
 def approve(order_id: int, approver: str, *,
@@ -268,10 +427,13 @@ def approve(order_id: int, approver: str, *,
        same row, delivered) this order cannot also sign off on paying it.
        Checked against `order_claims`, which is the one place "claimed or
        fulfilled" is recorded for a worker.
-    2. A zero or missing snapshot price raises `ZeroPrice` before any
-       transfer happens -- a corrupted price snapshot must be a loud
-       failure, never a silent 0-coin transfer that *looks* like a
-       successful payout in the ledger.
+    2. A zero or missing snapshot price raises `ZeroPrice`, and an order
+       whose ENTIRE payout telescopes to 0 raises `ZeroPayout` -- both
+       before any transfer happens and before the order is closed. A
+       payout of nothing must be a loud failure, never a silent 0-coin
+       transfer that *looks* like a successful payout in the ledger. The
+       order stays `awaiting_verification` either way, so staff can
+       `reprice()` or `cancel()` it: a delivered order ALWAYS has an exit.
     3. Each claim's `paid_event`/`paid_coins` are written by an
        UPDATE ... WHERE paid_event IS NULL -- the SAME statement that
        decides "should this claim be paid" also claims the unique payout
@@ -318,6 +480,23 @@ def approve(order_id: int, approver: str, *,
             (order_id,),
         ).fetchall()
         payouts = split_charge([cl["delivered"] for cl in claims], price, unit_pieces)
+
+        # CONTRACT.md sec 8 rule 11, the other half of the ZeroPrice guard. A
+        # non-zero price can still telescope the WHOLE order to 0 (one piece
+        # at 1 coin per 64 pieces: charge(1, 1, 64) == 0). The old loop then
+        # paid nobody, reported paid_coins=0, and closed the order
+        # 'fulfilled' -- a silent zero-coin payment that permanently buried
+        # real delivered work. Raise BEFORE any claim is marked paid and
+        # BEFORE the order is closed, leaving it in awaiting_verification so
+        # staff can reprice() or cancel() it. A per-claim 0 inside a non-zero
+        # total is legitimate rounding and is skipped below, not raised.
+        delivered_total = sum(cl["delivered"] for cl in claims)
+        if delivered_total > 0 and sum(payouts) <= 0:
+            raise ZeroPayout(
+                f"order {order_id} delivered {delivered_total} piece(s) but its whole "
+                f"payout computes to 0 at {price:,} {CURRENCY} per {unit_pieces} "
+                f"piece(s); refusing to pay zero and close -- reprice or cancel it"
+            )
 
         paid_total = 0
         paid_claims = 0

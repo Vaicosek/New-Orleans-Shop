@@ -263,18 +263,33 @@ def install() -> None:
         def __init__(self, coro, **_kw):
             self.coro = coro
             self._before = None
+            self._error = None
+            self._running = False
 
         def __get__(self, obj, objtype=None):
             return self
 
         def start(self) -> None:
-            pass
+            self._running = True
 
         def cancel(self) -> None:
-            pass
+            self._running = False
+
+        def is_running(self) -> bool:
+            return self._running
+
+        def restart(self, *a, **kw) -> None:
+            self._running = True
 
         def before_loop(self, f):
             self._before = f
+            return f
+
+        def error(self, f):
+            """Register the loop's exception handler. Real discord.py stops a
+            task loop for good on an unhandled exception; a cog that omits
+            this handler has a dead loop and no way to know."""
+            self._error = f
             return f
 
     def loop(**kw):

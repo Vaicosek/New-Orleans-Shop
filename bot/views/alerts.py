@@ -12,9 +12,10 @@ import re
 
 import discord
 
-from core import alerts, catalog
+from core import alerts, catalog, money
 
 from .. import addressing
+from ..permissions import is_staff
 from ..ui.embed import panel_embed
 
 _ADDRESS_MARK = re.compile(r"address (\S+)")
@@ -56,10 +57,28 @@ def build_alert_embed(due_row: dict) -> discord.Embed:
 
 
 class AlertAckView(discord.ui.View):
-    """Persistent. Registered once at boot with no item id attached."""
+    """Persistent. Registered once at boot with no item id attached.
+
+    This card is PUBLIC, and acknowledging writes real suppression state --
+    at 0 stock it silences the loudest alarm the shop has. So the button is
+    staff-gated on the interacting user, re-checked on every click, exactly
+    like `OrderCardView.approve_btn`: being able to see a message and press
+    a button on it implies nothing about being allowed to."""
 
     def __init__(self) -> None:
         super().__init__(timeout=None)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        # Re-checked per click, and the config comes from the CLIENT: this
+        # view is registered at boot with placeholder state, so `self` holds
+        # no config to trust.
+        config = getattr(interaction.client, "nola_config", None)
+        if config is None or not is_staff(interaction.user, config):
+            await interaction.response.send_message(
+                "Acknowledging a restock alert is staff-only.", ephemeral=True
+            )
+            return False
+        return True
 
     @discord.ui.button(label="Acknowledge", style=discord.ButtonStyle.secondary,
                         custom_id="nola:alert:ack")
@@ -70,7 +89,7 @@ class AlertAckView(discord.ui.View):
             return
         await interaction.response.defer(ephemeral=True)
         try:
-            alerts.acknowledge(item_id)
+            alerts.acknowledge(item_id, actor=money.user(interaction.user.id))
         except alerts.AlertError as err:
             await interaction.followup.send(f"Could not acknowledge: {err}", ephemeral=True)
             return

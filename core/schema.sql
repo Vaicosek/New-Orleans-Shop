@@ -288,6 +288,21 @@ CREATE TABLE IF NOT EXISTS game_rounds (
     CHECK ((state = 'settled') = (server_seed IS NOT NULL AND outcome_json IS NOT NULL))
 );
 
+-- A commitment is published (hash only) BEFORE any stake is accepted, and the
+-- seed behind it is random -- never derived from the round id, the player or
+-- the bet. `next_nonce` is claimed atomically per commitment, so a nonce is
+-- never reused and never rewound. Revealing happens at settlement.
+CREATE TABLE IF NOT EXISTS game_commitments (
+    id               TEXT    PRIMARY KEY,
+    server_seed      TEXT    NOT NULL,
+    server_seed_hash TEXT    NOT NULL,
+    next_nonce       INTEGER NOT NULL DEFAULT 0 CHECK (next_nonce >= 0),
+    state            TEXT    NOT NULL DEFAULT 'open'
+                             CHECK (state IN ('open', 'revealed')),
+    created_at       TEXT    NOT NULL DEFAULT (datetime('now')),
+    revealed_at      TEXT
+);
+
 CREATE TABLE IF NOT EXISTS game_bets (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     round_id      TEXT    NOT NULL REFERENCES game_rounds(id) ON DELETE CASCADE,

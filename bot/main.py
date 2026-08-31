@@ -148,6 +148,13 @@ class NolaBot(commands.Bot):
         missing = [c for c in COGS if c not in loaded]
         lines.append(f"cogs loaded: {len(loaded)}/{len(COGS)}"
                      + (f"  MISSING: {', '.join(missing)}" if missing else ""))
+        # The restock scan's own health, from its LAST SUCCESSFUL SCAN. A
+        # resolved alerts channel says nothing about whether the loop is
+        # still alive, and a dead safety system reporting OK is the worst
+        # line this block could print.
+        _admin_cog = self.get_cog("AdminCog")
+        if _admin_cog is not None and hasattr(_admin_cog, "scan_health"):
+            lines.append(_admin_cog.scan_health())
         lines.append(f"currency: {pricing.CURRENCY} (gold ingots, whole numbers)")
         lines.extend(_database_lines())
         lines.append("=" * 60)

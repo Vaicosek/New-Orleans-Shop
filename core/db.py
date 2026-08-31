@@ -142,6 +142,12 @@ _MIGRATIONS: list[str] = [
     # after shipping without one -- CONTRACT.md sec 4 promises "who did it",
     # which is meaningless without also saying to whom.
     "ALTER TABLE audit_actions ADD COLUMN target TEXT NOT NULL DEFAULT ''",
+    # game_rounds gained `commitment_id` when the casino moved to published
+    # commitments. schema.sql uses CREATE TABLE IF NOT EXISTS, so an existing
+    # database never picks a new column up from the DDL -- only from here.
+    # Nullable on purpose: rounds played before the change have no commitment
+    # and must verify as ok=False rather than pretend to one.
+    "ALTER TABLE game_rounds ADD COLUMN commitment_id TEXT",
 ]
 
 

@@ -353,6 +353,101 @@ with db.db() as c:
 check("every treasury:games ledger entry came from a scoped service move, not a mint",
       all(r["service"] == "games" for r in ledger_svc))
 
+# ------------------------------------------------------------------ MAX_DAILY_LOSS is WALLET-WIDE
+# CONTRACT.md section 9 lists MAX_DAILY_LOSS as ONE guardrail enforced
+# server-side at hold time. If exposure is bucketed per wager kind, a player
+# runs casino and prediction stakes side by side and realises ~2x the cap
+# while every individual wager passes the check. This proves the COMBINED
+# accepted exposure never crosses MAX_DAILY_LOSS.
+print("\nMAX_DAILY_LOSS is one wallet-wide cap across both wager kinds")
+reset()
+money.mint("u:60", 1_000_000, service="owner", reason="seed")
+age_wallet("u:60")
+
+mkt_cap = predictions.open_market("cap test", ["a", "b"], created_by="owner")
+rid_cap = games.open_round("coinflip", "cap-seed", 0)
+
+STAKE = games.MAX_BET                       # 5,000 -- 4 of these is exactly the cap
+accepted = 0
+refusals: list[str] = []
+for i in range(12):                          # far more attempts than the cap allows
+    if i % 2 == 0:
+        try:
+            games.place_bet(rid_cap, "u:60", "heads", STAKE)
+            accepted += STAKE
+        except games.DailyLossExceeded:
+            refusals.append("games")
+    else:
+        try:
+            predictions.stake(mkt_cap, "u:60", "a", STAKE)
+            accepted += STAKE
+        except predictions.WagerRefused:
+            refusals.append("predictions")
+
+check("combined casino + prediction exposure never exceeds MAX_DAILY_LOSS",
+      accepted <= games.MAX_DAILY_LOSS,
+      f"accepted {accepted:,} against a cap of {games.MAX_DAILY_LOSS:,}")
+check("the cap is actually reachable (not refusing everything)",
+      accepted == games.MAX_DAILY_LOSS, f"accepted {accepted:,}")
+check("both kinds refuse once the shared cap is full",
+      "games" in refusals and "predictions" in refusals, f"refusals={refusals}")
+
+with db.db() as c:
+    held = c.execute(
+        "SELECT COALESCE(SUM(amount - captured - released), 0) AS h FROM ledger_holds "
+        "WHERE subject = 'u:60' AND state = 'open'"
+    ).fetchone()["h"]
+check("open holds match the accepted total exactly", held == accepted, f"held={held}")
+
+# The first wager of the OTHER kind, once one kind has filled the cap on its
+# own, must be refused -- that is the exact bypass.
+reset()
+money.mint("u:61", 1_000_000, service="owner", reason="seed")
+age_wallet("u:61")
+rid_cap2 = games.open_round("dice", "cap-seed-2", 0)
+for _ in range(4):
+    games.place_bet(rid_cap2, "u:61", "1", games.MAX_BET)        # 20,000: the whole cap
+check("casino alone can fill the cap", money.balance("u:61").held == games.MAX_DAILY_LOSS,
+      f"held={money.balance('u:61').held}")
+mkt_cap2 = predictions.open_market("cap test 2", ["a", "b"], created_by="owner")
+raises("a prediction stake on top of a full casino cap is refused",
+       predictions.WagerRefused, predictions.stake, mkt_cap2, "u:61", "a", 1)
+check("the refused stake left no hold behind",
+      money.balance("u:61").held == games.MAX_DAILY_LOSS)
+
+# and the mirror image: predictions fill the cap, casino is refused
+reset()
+money.mint("u:62", 1_000_000, service="owner", reason="seed")
+age_wallet("u:62")
+mkt_cap3 = predictions.open_market("cap test 3", ["a", "b"], created_by="owner")
+for _ in range(4):
+    predictions.stake(mkt_cap3, "u:62", "a", games.MAX_BET)
+check("predictions alone can fill the cap",
+      money.balance("u:62").held == games.MAX_DAILY_LOSS,
+      f"held={money.balance('u:62').held}")
+rid_cap3 = games.open_round("coinflip", "cap-seed-3", 0)
+raises("a casino bet on top of a full prediction cap is refused",
+       games.DailyLossExceeded, games.place_bet, rid_cap3, "u:62", "heads", 1)
+check("the refused bet left no hold behind",
+      money.balance("u:62").held == games.MAX_DAILY_LOSS)
+
+# realised loss and open exposure share the same budget
+reset()
+money.mint("u:63", 1_000_000, service="owner", reason="seed")
+age_wallet("u:63")
+with db.db() as c:
+    c.execute(
+        "INSERT INTO gambling_day (subject, day, staked, lost) "
+        "VALUES ('u:63', strftime('%Y-%m-%d','now'), 0, ?)",
+        (games.MAX_DAILY_LOSS - 5_000,),
+    )
+mkt_cap4 = predictions.open_market("cap test 4", ["a", "b"], created_by="owner")
+predictions.stake(mkt_cap4, "u:63", "a", 5_000)                  # exactly the room left
+rid_cap4 = games.open_round("dice", "cap-seed-4", 0)
+raises("realised loss + open prediction exposure closes the casino door",
+       games.DailyLossExceeded, games.place_bet, rid_cap4, "u:63", "1", 1)
+
+
 print()
 if FAILS:
     print(f"{len(FAILS)} FAILED: {', '.join(FAILS)}")

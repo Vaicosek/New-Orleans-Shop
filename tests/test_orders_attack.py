@@ -366,6 +366,184 @@ check("the stored claim identity was itself normalised (not just the "
       f"{orders.list_claims(order_id)[0]['worker']!r}")
 
 
+# ================================================================== Attack 8
+# THE DEAD END. A worker delivers real work; the order lands in
+# `awaiting_verification`; and then NOTHING can move it. approve() raises
+# ZeroPrice forever on a zero snapshot price, cancel() excluded
+# awaiting_verification, and there was no way to repair the snapshot. The
+# delivered labour is lost and the approval queue fills with zombies staff
+# cannot clear. Under-delivered variants block the order for everyone else too.
+#
+# The invariant this section defends, stated once:
+#   FOR EVERY NON-CLOSED ORDER THERE IS AT LEAST ONE REACHABLE TERMINAL
+#   TRANSITION -- pay, or cancel. Never neither.
+print("\nattack 8a: a delivered order with a ZERO snapshot price can still "
+      "be cancelled (it must not be a permanent dead end)")
+reset()
+seed_treasury()
+free_item = make_item("Freebie", price=0, stack=64)
+dead1 = orders.create_order(free_item, 64, created_by="u:owner")
+orders.claim(dead1, "u:worker1", 64)
+orders.mark_fulfilled(dead1, "u:worker1", 64)
+check("the zero-priced order really is stuck awaiting_verification",
+      orders.get_order(dead1)["status"] == "awaiting_verification")
+raises("approve() still refuses a zero snapshot price loudly (ZeroPrice)",
+       orders.ZeroPrice, orders.approve, dead1, "u:manager")
+orders.cancel(dead1, actor="u:manager", reason="unpriced, voided by staff")
+check("EXIT 1: the delivered zero-price order was cancelled, not stranded",
+      orders.get_order(dead1)["status"] == "cancelled",
+      f"got {orders.get_order(dead1)['status']}")
+check("cancelling a delivered order closes it (closed_at set)",
+      orders.get_order(dead1)["closed_at"] is not None)
+with db.db() as c:
+    arow = c.execute("SELECT * FROM audit_actions WHERE kind = 'order.cancel' "
+                     "AND target = ?", (f"order:{dead1}",)).fetchone()
+check("cancelling wrote one audit_actions row naming the order",
+      arow is not None, "no order.cancel audit row")
+check("the cancel audit row names the unpaid delivered claim as a manual op",
+      arow is not None and "u:worker1" in arow["ops_json"],
+      f"ops_json={arow['ops_json'] if arow else None!r}")
+check("no coins moved on a cancel", money.balance("u:worker1").coins == 0)
+
+
+print("\nattack 8b: a delivered order with a ZERO snapshot price can be "
+      "REPRICED by staff and then approved and paid")
+reset()
+seed_treasury()
+free2 = make_item("Freebie2", price=0, stack=64)
+dead2 = orders.create_order(free2, 64, created_by="u:owner")
+orders.claim(dead2, "u:worker1", 64)
+orders.mark_fulfilled(dead2, "u:worker1", 64)
+raises("before the repair, approve() is a dead end (ZeroPrice)",
+       orders.ZeroPrice, orders.approve, dead2, "u:manager")
+repriced = orders.reprice(dead2, 300, 64, actor="u:manager")
+check("reprice() returns the updated order with the new snapshot price",
+      repriced["price_coins"] == 300 and repriced["price_unit_pieces"] == 64,
+      f"got {repriced.get('price_coins')}/{repriced.get('price_unit_pieces')}")
+check("reprice() did NOT close or otherwise move the order",
+      repriced["status"] == "awaiting_verification", f"got {repriced['status']}")
+res8b = orders.approve(dead2, "u:manager")
+check("EXIT 2: the repriced order paid the delivered work (300)",
+      res8b["paid_coins"] == 300, f"got {res8b}")
+check("the worker actually received the 300",
+      money.balance("u:worker1").coins == 300,
+      f"got {money.balance('u:worker1').coins}")
+with db.db() as c:
+    rrow = c.execute("SELECT * FROM audit_actions WHERE kind = 'order.reprice' "
+                     "AND target = ?", (f"order:{dead2}",)).fetchone()
+check("reprice wrote one audit_actions row naming before and after",
+      rrow is not None and "300" in rrow["summary"],
+      f"{dict(rrow) if rrow else None}")
+raises("a PAID order can never be repriced afterwards",
+       orders.NotClaimable, orders.reprice, dead2, 999, 64, actor="u:manager")
+raises("reprice refuses a zero price (that is the defect, not a repair)",
+       ValueError, orders.reprice, dead2, 0, 64, actor="u:manager")
+
+
+print("\nattack 8c: a delivered order whose TOTAL payout computes to 0 must "
+      "raise loudly, never pay zero coins and close permanently")
+reset()
+seed_treasury()
+# price 1 per 64 pieces, one delivered piece: charge(1, 1, 64) == 0.
+# The snapshot price is NON-zero, so ZeroPrice does not fire -- the old code
+# happily paid nobody and slammed the order shut as 'fulfilled'.
+dust = make_item("Dust", price=1, stack=64)
+dead3 = orders.create_order(dust, 1, created_by="u:owner")
+orders.claim(dead3, "u:worker1", 1)
+orders.mark_fulfilled(dead3, "u:worker1", 1)
+check("sanity: this order's whole payout really does compute to 0",
+      charge(1, 1, 64) == 0, f"charge(1,1,64)={charge(1, 1, 64)}")
+raises("CONTRACT sec 8 rule 11: a total payout of 0 is a LOUD failure "
+       "(ZeroPayout), never a silent zero-coin payment",
+       orders.ZeroPayout, orders.approve, dead3, "u:manager")
+check("the order is NOT closed by the refused approve -- it stays "
+      "awaiting_verification so staff can reprice or cancel it",
+      orders.get_order(dead3)["status"] == "awaiting_verification",
+      f"got {orders.get_order(dead3)['status']}")
+check("no claim was marked paid by the refused approve",
+      all(cl["paid_event"] is None for cl in orders.list_claims(dead3)),
+      f"{[cl['paid_event'] for cl in orders.list_claims(dead3)]}")
+check("nobody was credited 0 coins in the ledger",
+      money.balance("u:worker1").coins == 0)
+# ... and it still has an exit, both ways.
+orders.reprice(dead3, 100, 1, actor="u:manager")
+res8c = orders.approve(dead3, "u:manager")
+check("EXIT: after a reprice the same order pays real coins (100)",
+      res8c["paid_coins"] == 100 and money.balance("u:worker1").coins == 100,
+      f"got {res8c}")
+
+
+print("\nattack 8d: a per-claim payout of 0 inside a NON-zero total is "
+      "legitimate and must still be skipped, not raised")
+reset()
+seed_treasury()
+# 1 coin per 64 pieces, 64 pieces split across 64 one-piece claims:
+# split_charge telescopes to 0, 0, ... , 1, ... -- most fragments legally
+# round to 0 while the ORDER total is a correct, non-zero 1. That must pay,
+# not raise ZeroPayout.
+frag = make_item("Fragment", price=1, stack=64)
+ord8d = orders.create_order(frag, 64, created_by="u:owner")
+for i in range(64):
+    orders.claim(ord8d, f"u:frag{i}", 1)
+for i in range(64):
+    orders.mark_fulfilled(ord8d, f"u:frag{i}", 1)
+res8d = orders.approve(ord8d, "u:manager")
+check("the fragmented order still pays exactly charge(64, 1, 64) = 1",
+      res8d["paid_coins"] == charge(64, 1, 64) == 1, f"got {res8d}")
+paid8d = orders.list_claims(ord8d)
+check("at least one claim legitimately rounded to a 0 payout and was skipped",
+      any(cl["paid_coins"] in (None, 0) for cl in paid8d),
+      f"{[cl['paid_coins'] for cl in paid8d]}")
+check("the order closed as fulfilled -- a legitimate per-claim 0 is not a "
+      "ZeroPayout",
+      orders.get_order(ord8d)["status"] == "fulfilled")
+
+
+print("\nattack 8e: cancel() is allowed from awaiting_verification and "
+      "REFUSED from the two closed states")
+reset()
+seed_treasury()
+it8e = make_item("Coal", price=300, stack=64)
+paid_order = orders.create_order(it8e, 64, created_by="u:owner")
+orders.claim(paid_order, "u:worker1", 64)
+orders.mark_fulfilled(paid_order, "u:worker1", 64)
+orders.approve(paid_order, "u:manager")
+raises("a FULFILLED order cannot be cancelled (real money already moved)",
+       orders.NotClaimable, orders.cancel, paid_order, actor="u:manager")
+check("the fulfilled order is untouched by the refused cancel",
+      orders.get_order(paid_order)["status"] == "fulfilled")
+
+open_order = orders.create_order(it8e, 64, created_by="u:owner")
+orders.cancel(open_order, actor="u:manager")
+raises("a CANCELLED order cannot be cancelled twice",
+       orders.NotClaimable, orders.cancel, open_order, actor="u:manager")
+
+# The invariant, swept across every non-closed state.
+print("\nattack 8f: INVARIANT -- every non-closed order has at least one "
+      "reachable terminal transition")
+reset()
+seed_treasury()
+sweep_item = make_item("Sweep", price=0, stack=64)       # worst case: price 0
+states: dict[str, int] = {}
+o_open = orders.create_order(sweep_item, 64, created_by="u:owner")
+states["open"] = o_open
+o_claimed = orders.create_order(sweep_item, 64, created_by="u:owner")
+orders.claim(o_claimed, "u:w1", 32)
+states["claimed"] = o_claimed
+o_await = orders.create_order(sweep_item, 64, created_by="u:owner")
+orders.claim(o_await, "u:w2", 64)
+orders.mark_fulfilled(o_await, "u:w2", 64)
+states["awaiting_verification"] = o_await
+for state, oid in states.items():
+    check(f"order in state {state!r} is really in that state",
+          orders.get_order(oid)["status"] == state,
+          f"got {orders.get_order(oid)['status']}")
+    orders.cancel(oid, actor="u:manager", reason="invariant sweep")
+    check(f"order in state {state!r} had a reachable exit (cancel)",
+          orders.get_order(oid)["status"] == "cancelled",
+          f"got {orders.get_order(oid)['status']}")
+
+
 print()
 if FAILS:
     print(f"{len(FAILS)} FAILED: {', '.join(FAILS)}")

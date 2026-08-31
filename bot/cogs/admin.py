@@ -3,6 +3,8 @@ background scan that posts to `ALERTS_CHANNEL_ID`.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
@@ -18,6 +20,10 @@ from ..views.alerts import AlertAckView, build_alert_embed
 class AdminCog(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
+        # The health signal is the last SUCCESSFUL scan, not the fact that a
+        # channel resolved once at boot.
+        self.last_scan_ok_at: datetime | None = None
+        self.last_scan_error: str | None = None
         self.scan_alerts.start()
 
     def cog_unload(self) -> None:
@@ -37,6 +43,14 @@ class AdminCog(commands.Cog):
 
     @tasks.loop(minutes=10)
     async def scan_alerts(self) -> None:
+        """Post every due restock alert. One bad item skips ONE item.
+
+        A single exception escaping this coroutine stops a `tasks.loop` for
+        the life of the process -- no DM, no post, no log anyone reads -- so
+        the alerting system dies silently while every other command still
+        works. The try/except therefore lives INSIDE the loop, and the
+        per-scan success time below is what the boot self-check reports.
+        """
         config = getattr(self.bot, "nola_config", None)
         if config is None:
             return
@@ -48,7 +62,32 @@ class AdminCog(commands.Cog):
         if channel is None:
             return
         for due_row in alerts.due():
-            await channel.send(embed=build_alert_embed(due_row), view=AlertAckView())
+            try:
+                await channel.send(embed=build_alert_embed(due_row), view=AlertAckView())
+            except Exception as err:            # noqa: BLE001 -- one item, not the scan
+                self.last_scan_error = f"{due_row['item_id']}: {type(err).__name__}: {err}"
+                print(f"[alerts] item {due_row['item_id']} failed: {err}", flush=True)
+        # Advanced per completed scan, not at startup: the health line below
+        # must describe work that actually happened.
+        self.last_scan_ok_at = datetime.now(timezone.utc)
+
+    @scan_alerts.error
+    async def scan_alerts_error(self, err: BaseException) -> None:
+        """Without this the loop dies silently for the life of the process."""
+        print(f"[alerts] scan loop crashed: {err!r} -- restarting", flush=True)
+        self.last_scan_error = f"loop crashed: {err!r}"
+        if not self.scan_alerts.is_running():
+            self.scan_alerts.restart()
+
+    def scan_health(self) -> str:
+        """One line for the boot self-check. Never says OK on the strength of
+        a channel that resolved once at startup -- a dead safety system
+        reporting healthy is worse than no report at all."""
+        if self.last_scan_ok_at is None:
+            return "restock scan: NO SUCCESSFUL SCAN YET" + (
+                f" -- last error: {self.last_scan_error}" if self.last_scan_error else "")
+        return (f"restock scan: last success {self.last_scan_ok_at:%Y-%m-%d %H:%M:%S} UTC"
+                + (f"  (last error: {self.last_scan_error})" if self.last_scan_error else ""))
 
     @scan_alerts.before_loop
     async def before_scan(self) -> None:

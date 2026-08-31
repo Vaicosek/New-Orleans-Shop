@@ -255,6 +255,67 @@ check(
     not id_leak_offenders, "; ".join(id_leak_offenders),
 )
 
+# ------------------------------------------------------------------ casino: the player supplies the seed
+# `core.games` can only be provably fair if the PLAYER path actually uses
+# it. Two halves have to be wired, and a core-only fix leaves both undone
+# while every core test still passes:
+#
+#   1. the client seed is typed by the player, not built by the house. The
+#      original defect was literally `client_seed = f"{subject}:{interaction.id}"`
+#      -- both seeds house-chosen, so the "proof" proved nothing.
+#   2. a commitment is published (`games.commit()`) BEFORE the bet modal
+#      opens, and its id is carried into `games.play(commitment_id=...)`.
+#      A hash the player is shown after staking is not a commitment.
+_casino_src = (ROOT / "bot" / "views" / "casino.py").read_text(encoding="utf-8")
+
+check(
+    "casino builds no server-side client seed from interaction.id",
+    not re.search(r"client_seed\s*=\s*f?[\"'][^\"']*interaction\.id", _casino_src),
+    "the house is choosing the player's seed again",
+)
+check(
+    "casino bet modal takes the player's own seed as free text",
+    'label="Your seed"' in _casino_src,
+    "no 'Your seed' TextInput in the bet modal",
+)
+check(
+    "casino publishes a commitment before the stake is taken",
+    "games.commit(" in _casino_src,
+    "games.commit() is never called from the player path",
+)
+check(
+    "casino carries that commitment into games.play",
+    "commitment_id=" in _casino_src,
+    "games.play() is called without the published commitment",
+)
+
+# ------------------------------------------------- every exit has a caller
+# "Built but never called" is the standard failure of a parallel build, and
+# green tests cannot see it: core/orders.py had `cancel` and `reprice` fully
+# implemented and unit-tested while NOTHING under bot/ could reach either, so
+# an order with a zero price snapshot could not be paid (approve raises) and
+# could not be voided (no caller) -- the pieces stayed claimed forever and the
+# delivered work was lost. The invariant is section-level: for every
+# non-closed order there is at least one reachable terminal transition.
+BOT_SOURCE = "\n".join(
+    path.read_text(encoding="utf-8")
+    for path in sorted(Path(ROOT / "bot").rglob("*.py"))
+)
+
+REACHABLE_FROM_BOT = [
+    ("orders_core.cancel(", "an order can be voided"),
+    ("orders_core.reprice(", "a zero-price order can be repaired and then paid"),
+    ("orders_core.approve(", "a delivered order can be paid"),
+]
+for needle, why in REACHABLE_FROM_BOT:
+    check(f"bot/ can reach {needle[:-1]} -- so {why}",
+          needle in BOT_SOURCE,
+          "implemented in core but unreachable from any Discord surface")
+
+# The detector itself must be able to fail, or it proves nothing.
+check("...and this check would notice an unwired function",
+      "orders_core.definitely_not_a_real_function(" not in BOT_SOURCE)
+
 print()
 if FAILS:
     print(f"{len(FAILS)} FAILED: {', '.join(FAILS)}")

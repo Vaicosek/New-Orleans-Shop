@@ -13,7 +13,7 @@ from aiohttp import web
 
 from core.db import connection
 from core.money import balance, public_history
-from core.pricing import price_label
+from core.pricing import money_text, price_label
 
 from ..auth import resolve_identity
 from ..shell import esc, page
@@ -44,7 +44,11 @@ def _my_claims(subject: str) -> list[dict]:
 
 
 def _claim_row(c: dict) -> str:
-    paid = f'{c["paid_coins"]:,}' if c["paid_coins"] is not None else "—"
+    # An unpaid claim shows an em-dash, not a zero -- "not paid yet" and
+    # "paid nothing" are different facts. Every figure that IS money goes
+    # through `pricing.money_text`, so it carries the `g` symbol after the
+    # number; a bare number here is an ambiguous unit (CONTRACT.md sec 5).
+    paid = money_text(c["paid_coins"]) if c["paid_coins"] is not None else "—"
     price = esc(price_label(c["price_coins"], c["price_unit_pieces"], c["stack_size"]))
     return (
         f'<tr><td>#{c["order_id"]}</td><td>{esc(c["item_name"])}</td>'
@@ -58,8 +62,8 @@ def _history_row(e: dict) -> str:
     tone = "gain" if e["delta"] > 0 else "loss"
     return (
         f'<tr><td>{esc(e["ts"])}</td><td>{esc(e["reason"])}</td>'
-        f'<td class="num {tone}">{e["delta"]:+,}</td>'
-        f'<td class="num">{e["balance_after"]:,}</td></tr>'
+        f'<td class="num {tone}">{money_text(e["delta"], sign=True)}</td>'
+        f'<td class="num">{money_text(e["balance_after"])}</td></tr>'
     )
 
 
@@ -104,7 +108,7 @@ async def me(request: web.Request) -> web.Response:
 <h1>Account</h1>
 <p>{esc(identity.name)}</p>
 <h2>Balance</h2>
-<p>{bal.coins:,} coins &middot; {bal.held:,} held &middot; {bal.available:,} available</p>
+<p>{money_text(bal.coins)} &middot; {money_text(bal.held)} held &middot; {money_text(bal.available)} available</p>
 <h2>Your orders</h2>
 {claims_table}
 <h2>History</h2>

@@ -8,9 +8,11 @@ chosen outcome, or the market's own question) -- never an id.
 """
 from __future__ import annotations
 
+import secrets
+
 import discord
 
-from core import alerts, audit, catalog, db, money, predictions, pricing
+from core import alerts, audit, catalog, money, predictions, pricing
 
 from .. import addressing
 
@@ -76,11 +78,19 @@ def build_treasury_embed() -> discord.Embed:
 
 class _FundAmountModal(discord.ui.Modal):
     """Free text, because an amount IS free text -- a picker cannot offer
-    every number. The treasury itself was chosen from a Select first."""
+    every number. The treasury itself was chosen from a Select first.
 
-    def __init__(self, subject: str, funder: str):
+    This is also where the funding's idempotency key is MINTED, at the source
+    event, from a fresh `preview_id`. One preview is one approval is one key:
+    the key travels unchanged through the gate and the confirm modal, so a
+    double click, a Discord retry or a re-submitted modal all resolve to the
+    same single mint. It is never rebuilt later from a timestamp or from an
+    interaction id, both of which differ per click and would mint twice.
+    """
+
+    def __init__(self, subject: str, funder: str, config):
         super().__init__(title=f"Fund {money.TREASURY_NAMES[subject]}"[:45], timeout=300)
-        self.subject, self.funder = subject, funder
+        self.subject, self.funder, self.config = subject, funder, config
         self.amount = discord.ui.TextInput(
             label=f"How much {pricing.CURRENCY} to add?", placeholder="e.g. 50000",
             max_length=15)
@@ -96,6 +106,8 @@ class _FundAmountModal(discord.ui.Modal):
         amount = int(raw)
         label = money.TREASURY_NAMES[self.subject]
         before = money.balance(self.subject).coins
+        preview_id = secrets.token_hex(8)
+        idem_key = f"treasury.fund:{self.subject}:{amount}:{preview_id}"
         # Preview with the real figures. He confirms numbers, not intentions.
         await interaction.followup.send(
             f"Funding {label}\n"
@@ -104,7 +116,7 @@ class _FundAmountModal(discord.ui.Modal):
             f"After: {money_text(before + amount)}\n\n"
             f"This creates {money_text(amount)} that did not exist before. "
             f"Type the treasury's name to confirm.",
-            view=_FundGate(self.subject, amount, self.funder),
+            view=_FundGate(self.subject, amount, self.funder, idem_key, self.config),
             ephemeral=True,
         )
 
@@ -115,11 +127,19 @@ class _FundConfirmModal(discord.ui.Modal):
     The name is shown on the preview above, so this is an attention gate
     rather than a secret -- which is the honest thing for it to be. What it
     is not is a placeholder pre-filled with the answer.
+
+    The mint runs inside `money.guarded`, claim-first, keyed on the key minted
+    at the preview -- and that SAME key is the audit row's `action_key`, which
+    is UNIQUE with ON CONFLICT DO NOTHING. So a repeat submission can neither
+    create coins a second time nor leave a second row that reads like a second
+    legitimate funding. `money.mint`'s own `idem_key` only labels the ledger
+    row; it does not deduplicate. `guarded` is what does.
     """
 
-    def __init__(self, subject: str, amount: int, funder: str):
+    def __init__(self, subject: str, amount: int, funder: str, idem_key: str):
         super().__init__(title="Confirm funding", timeout=300)
         self.subject, self.amount, self.funder = subject, amount, funder
+        self.idem_key = idem_key
         self.confirm = discord.ui.TextInput(
             label=f"Type: {money.TREASURY_NAMES[subject]}", max_length=40)
         self.add_item(self.confirm)
@@ -132,53 +152,114 @@ class _FundConfirmModal(discord.ui.Modal):
                                             ephemeral=True)
             return
         try:
-            with db.db() as c:
-                after = money.mint(self.subject, self.amount, service="owner",
-                                   reason=f"treasury funding by {self.funder}",
-                                   ref_kind="treasury", ref_id=self.subject, conn=c)
-                audit.record(
-                    c, actor=self.funder, target=self.subject, kind="treasury.fund",
-                    summary=f"funded {label} with {self.amount:,} {pricing.CURRENCY}",
-                    money_coins=self.amount,
-                    ops=[{"op": "transfer", "from": self.subject,
-                          "to": "treasury:house", "amount": self.amount,
-                          "note": "reverse of a mint: move it out, it cannot be un-created"}],
-                )
+            with money.guarded(self.idem_key, service="owner",
+                               endpoint="treasury.fund",
+                               payload={"subject": self.subject,
+                                        "amount": self.amount}) as g:
+                replay = g.replay
+                if replay:
+                    after = g.response["balance_after"]
+                else:
+                    after = money.mint(
+                        self.subject, self.amount, service="owner",
+                        reason=f"treasury funding by {self.funder}",
+                        ref_kind="treasury", ref_id=self.subject,
+                        idem_key=self.idem_key, conn=g.conn)
+                    audit.record(
+                        g.conn, actor=self.funder, target=self.subject,
+                        kind="treasury.fund",
+                        summary=f"funded {label} with {self.amount:,} {pricing.CURRENCY}",
+                        money_coins=self.amount,
+                        ops=[{"op": "transfer", "from": self.subject,
+                              "to": "treasury:house", "amount": self.amount,
+                              "note": "reverse of a mint: move it out, it cannot be un-created"}],
+                        action_key=self.idem_key,
+                    )
+                    g.set_response({"balance_after": after})
         except money.MoneyError as err:
             await interaction.followup.send(f"Could not fund {label}: {err}", ephemeral=True)
+            return
+        if replay:
+            await interaction.followup.send(
+                f"That funding was already applied. {label} is at {money_text(after)}.",
+                ephemeral=True)
             return
         await interaction.followup.send(
             f"{label} funded. New balance {money_text(after)}.", ephemeral=True)
 
 
 class _FundGate(discord.ui.View):
-    def __init__(self, subject: str, amount: int, funder: str) -> None:
+    """One preview, one key, one effect.
+
+    The gate carries the key minted at the preview and CONSUMES itself on the
+    first submit, because a modal cannot be opened and the message edited on
+    one interaction response -- so the in-memory flag is the real guard and
+    the disabled button is the visual echo of it. Even if both are defeated
+    (a restart, a raced click), the key behind them makes the second attempt
+    a replay rather than a second mint.
+    """
+
+    def __init__(self, subject: str, amount: int, funder: str, idem_key: str,
+                 config) -> None:
         super().__init__(timeout=120)
         self.subject, self.amount, self.funder = subject, amount, funder
+        self.idem_key = idem_key
+        self.config = config
+        self._consumed = False
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        # Re-checked on EVERY click: an ephemeral message is still a message,
+        # and owner-ship at panel-open time is not owner-ship now.
+        config = self.config or getattr(interaction.client, "nola_config", None)
+        if config is None or not permissions.is_owner(interaction.user, config):
+            await interaction.response.send_message("Owners only.", ephemeral=True)
+            return False
+        return True
 
     @discord.ui.button(label="Confirm funding", style=discord.ButtonStyle.danger)
-    async def confirm(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if self._consumed:
+            await interaction.response.send_message(
+                "That funding was already submitted.", ephemeral=True)
+            return
+        self._consumed = True
+        button.disabled = True
         await interaction.response.send_modal(
-            _FundConfirmModal(self.subject, self.amount, self.funder))
+            _FundConfirmModal(self.subject, self.amount, self.funder, self.idem_key))
+        try:
+            await interaction.message.edit(view=self)      # best-effort visual
+        except (discord.HTTPException, AttributeError):
+            pass
 
 
 class _AddItemModal(discord.ui.Modal, title="Add item"):
+    """Five inputs, Discord's maximum, and no collapsing.
+
+    `price_unit_pieces` (how many pieces the price buys) and `stack_size` (the
+    Minecraft stack) are TWO numbers and are asked for separately. Collapsing
+    them made the sapling -- 1 g per 32 pieces, stack size 64 -- impossible to
+    enter, and every full stack of it silently half priced. CONTRACT.md
+    section 5 split those columns to make exactly that unrepresentable.
+    """
+
     name = discord.ui.TextInput(label="Name", max_length=100)
-    price = discord.ui.TextInput(label="Price per stack (g)", max_length=10)
+    price = discord.ui.TextInput(label="Price (g)", max_length=10)
+    unit_pieces = discord.ui.TextInput(label="Pieces that price buys", default="64",
+                                       max_length=6)
     stack_size = discord.ui.TextInput(label="Stack size", default="64", max_length=6)
     barrel_slots = discord.ui.TextInput(label="Barrel slots", default="54", max_length=6)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
         try:
-            stack_size = int(str(self.stack_size.value).strip())
-            # This modal only ever collects "price per stack" -- the quote
-            # unit is that same stack size, never a bare default.
+            # `catalog.add_item` owns the rule that a price unit may not
+            # exceed a stack, and the schema CHECKs it too -- so surface its
+            # message rather than re-deriving the rule here and drifting.
             item_id = catalog.add_item(
                 str(self.name.value).strip(),
                 int(str(self.price.value).strip()),
-                price_unit_pieces=stack_size,
-                stack_size=stack_size,
+                price_unit_pieces=int(str(self.unit_pieces.value).strip()),
+                stack_size=int(str(self.stack_size.value).strip()),
                 barrel_slots=int(str(self.barrel_slots.value).strip()),
             )
         except (catalog.CatalogError, ValueError) as err:
@@ -469,7 +550,8 @@ class AdminPanelView(_StaffGatedView):
         options = [(label, subject) for subject, label in money.TREASURY_NAMES.items()]
 
         async def picked(inter: discord.Interaction, subject: str) -> None:
-            await inter.response.send_modal(_FundAmountModal(subject, funder))
+            await inter.response.send_modal(
+                _FundAmountModal(subject, funder, config))
 
         await interaction.response.send_message(
             "Which treasury?",

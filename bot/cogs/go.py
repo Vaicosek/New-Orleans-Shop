@@ -14,6 +14,7 @@ from discord.ext import commands
 from .. import addressing
 from ..views.orders import build_order_embed, OrderCardView
 from ..views.alerts import build_alert_embed, AlertAckView
+from ..views import casino as casino_views
 from ..views.casino import build_verify_embed, RoundVerifyView
 from ..ui.embed import money_text, panel_embed
 from .. import queries
@@ -64,7 +65,19 @@ class GoCog(commands.Cog):
                 body = f"{stock['pieces']} in stock (capacity {stock['capacity']})."
                 await interaction.followup.send(embed=panel_embed(item["name"], body), ephemeral=True)
         elif kind == "game_round":
-            await interaction.followup.send(embed=build_verify_embed(entity_id), view=RoundVerifyView(),
+            embed = build_verify_embed(entity_id)
+            # `RoundVerifyView` is persistent: its button re-resolves the
+            # round from the message FOOTER, never from `self`. This embed
+            # renders no footer of its own, so without this the one UI
+            # element offered for checking a suspicious result could never
+            # resolve anything -- the button answered "could not identify
+            # this round" on the very card that was sent to identify it.
+            # Same footer `build_result_embed` writes, read by the same
+            # `casino.parse_round_id`.
+            embed.set_footer(
+                text=casino_views._round_footer(entity_id, addressing.mint("game_round", entity_id))
+            )
+            await interaction.followup.send(embed=embed, view=RoundVerifyView(),
                                              ephemeral=True)
         elif kind == "pred_market":
             market = queries.get_market_detail(int(entity_id))

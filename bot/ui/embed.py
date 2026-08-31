@@ -16,7 +16,8 @@ from __future__ import annotations
 
 import discord
 
-from core.pricing import CURRENCY, price_label
+from core import pricing
+from core.pricing import price_label
 
 EMBED_COLOR = discord.Color.dark_gold()
 SEP = "·"  # ' · ' joins fields on one row -- never ASCII '--'.
@@ -37,10 +38,13 @@ def money_text(amount: int) -> str:
     an earlier version took `currency_name="coin"` and every call site had
     to remember to override it, which is how a panel ends up printing
     "coins" while the price list next to it prints "g" for the same money.
+
+    One line, because the formatter itself now lives in `core.pricing` --
+    `web/` needs the same text and cannot import this module (it imports
+    discord). Output is byte-identical, and `pricing._require_int` keeps the
+    same TypeError for a bool or a non-int.
     """
-    if not isinstance(amount, int) or isinstance(amount, bool):
-        raise TypeError("amount must be an int")
-    return f"{amount:,} {CURRENCY}"
+    return pricing.money_text(amount)
 
 
 def price_line(name: str, price_coins: int, price_unit_pieces: int,

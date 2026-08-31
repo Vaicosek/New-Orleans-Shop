@@ -24,7 +24,7 @@ if something must contradict it, this file changes first.
 |---|---|
 | Market id | `nola` |
 | Display name | New Orleans |
-| Currency | Gold ingots, symbol `g`, whole numbers only -- `core.pricing.CURRENCY` (see S5). Stale: `core.config.currency_name`/`CURRENCY_NAME` still exists and defaults to "coin" but is no longer what any price renders; dead config for the integrator to retire. |
+| Currency | Gold ingots, symbol `g`, whole numbers only -- `core.pricing.CURRENCY` (see S5), the one place the symbol is defined. The old `core.config.currency_name`/`CURRENCY_NAME` setting, which defaulted to "coin", has been **retired** -- it no longer exists in `core/config.py` and nothing reads it. |
 | Wallet subjects | `u:<discord_id>`, `treasury:shop`, `treasury:games`, `treasury:house` |
 
 Real names everywhere a user looks. `nola` never appears in user-facing text.
@@ -59,12 +59,22 @@ imports it through `sys.modules["__main__"]`; that is the one thing we are not c
       theme.py            CSS tokens
       auth.py             Discord OAuth2, sessions, staff allowlist
       pages/              storefront.py, account.py, ledger.py
-    docs/                 *.md — the bot reads these at runtime
+    docs/                 *.md — written for the humans who deploy and maintain this
     tests/
 
-**`docs/` is a production concern.** The bot serves its own docs to users. A stale doc
-means the bot recommends a dead command to a real customer. Retiring anything sweeps its
-name from every user-facing string and every doc in the same commit.
+**`docs/` is for the humans maintaining the system, not for users.** Nothing under
+`bot/` reads `docs/` at runtime -- verified by grep across `bot/`, `web/`, `core/` and the
+`run_*.py` entrypoints, which returns no reader at all. `deploy.md`, `casino-seed-secret.md`
+and `shop-buildout.md` are operator documents: the person with the Wispbyte panel is their
+only audience. An earlier draft of this contract asserted the bot served its own docs to
+users and that a stale doc would make it recommend a dead command to a real customer; that
+was never built and is not planned here. If a `/help` that reads `docs/` is ever wanted, it
+is new work and this section changes first.
+
+The sweep rule stands regardless, and is the reason this directory is still named in the
+contract: **retiring anything sweeps its name from every user-facing string AND every doc in
+the same commit.** A stale doc misleads the operator instead of the customer, which is how a
+misdeployment happens rather than a bad recommendation -- a smaller blast radius, not none.
 
 ## 4. Data model
 
@@ -351,7 +361,7 @@ access-granting id is ever written into this repo or the brain.
 
 ## 12. Open — John decides
 
-1. ~~**Currency name.**~~ Decided: gold ingots, symbol `g`, whole numbers (S2, S5). `core.config.currency_name`/`CURRENCY_NAME` is leftover from before that decision and no longer drives anything a price renders -- dead config for the integrator to retire.
+1. ~~**Currency name.**~~ Decided and DONE: gold ingots, symbol `g`, whole numbers (S2, S5). The leftover `core.config.currency_name`/`CURRENCY_NAME` setting has been **removed** -- it is gone from `core/config.py` and no code reads it. Nothing is left for the integrator to retire here; the only surviving mention is a historical note in a `bot/ui/embed.py` docstring recording that an earlier version took the argument.
 2. **Casino games beyond coinflip and dice.** Blackjack and roulette are real work; worth it
    only if people will actually play them.
 3. **Prediction market rake.** Default 0 — you take nothing. A rake makes you the house in a

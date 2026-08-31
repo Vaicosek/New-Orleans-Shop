@@ -6,13 +6,19 @@ check()/raises(), real threads, exit 1 on any failure.
 Section [1] used to attack the FACT that core/games.py fell back to a public,
 insecure default server-seed secret when NOLA_GAME_SEED_SECRET was unset --
 this file deliberately left it unset to run that attack. `core/games.py` no
-longer HAS an insecure default: it refuses to derive a seed (and the bot
+longer HAS an insecure default: it refuses to open a round (and the bot
 refuses to boot) without a real one configured, so section [1] below now
 asserts that refusal instead. Every later section needs a real secret to do
-anything at all (open_round/place_bet/settle_round all call the same
-validated derivation), so this file sets one at import time and only
-manipulates it transiently, inside section [1] and [1b], to exercise the
-missing/placeholder/rotated cases on purpose.
+anything at all (open_round still validates it), so this file sets one at
+import time and only manipulates it transiently, inside section [1], to
+exercise the missing/placeholder/short cases on purpose.
+
+Section [10] is the big one: the commitment must be minted and PUBLISHED
+before the stake is known, the client seed must be the PLAYER's, and
+`verify()` must audit that pre-bet artifact rather than one it can recompute
+from the round it is validating. Section [11] attacks the draw itself --
+`digest[0] % 6` biased four dice faces and put the real house edge at
+4.26%/6.48% against a config that says 5%.
 """
 from __future__ import annotations
 
@@ -35,7 +41,7 @@ os.environ["NOLA_DB_PATH"] = str(Path(_tmp) / "test.db")
 # short/rotated cases specifically, then restores a real one afterwards.
 os.environ["NOLA_GAME_SEED_SECRET"] = "attack-file-baseline-real-secret-0123456789"
 
-from core import audit, db, money, games, predictions       # noqa: E402
+from core import audit, db, money, games, predictions, wagering   # noqa: E402
 
 FAILS: list[str] = []
 
@@ -64,9 +70,17 @@ def raises(name: str, exc, fn, *a, **kw) -> None:
 def reset() -> None:
     with db.db() as c:
         for t in ("pred_stakes", "pred_outcomes", "pred_markets", "game_bets",
-                  "game_rounds", "ledger_entries", "ledger_holds", "wallet_flags",
+                  "game_rounds", "game_commitments", "ledger_entries",
+                  "ledger_holds", "wallet_flags",
                   "idempotency", "gambling_day", "wallets"):
-            c.execute(f"DELETE FROM {t}")
+            try:
+                c.execute(f"DELETE FROM {t}")
+            except sqlite3.OperationalError as err:
+                # game_commitments is created on first use by core.games; a
+                # reset() before any commitment has ever been minted must not
+                # explode on it.
+                if "no such table" not in str(err).lower():
+                    raise
     money.ensure_wallet("treasury:games", deficit_floor=1_000_000, service="owner")
 
 
@@ -100,13 +114,13 @@ print("    exact env var and the exact command to generate a real value.")
 DEFAULT_SECRET = "dev-insecure-seed-secret-change-me"  # the old default, by value
 
 
-def predict_with_secret(game: str, round_id: str, client_seed: str, nonce: int,
-                         secret: str) -> str:
-    """The documented algorithm (public, stated in games.py's own module
-    docstring) applied to any given secret. An outside attacker who only
-    knows the algorithm and the OLD default secret computes exactly this
-    with `secret=DEFAULT_SECRET` -- no import of core.games, no access to
-    the process, no access to any previously-revealed seed."""
+def derived_seed_outcome(game: str, round_id: str, client_seed: str, nonce: int,
+                          secret: str) -> str:
+    """The OLD, now-deleted algorithm: server_seed = HMAC(secret, round_id),
+    outcome = digest[0] % n. Kept in this file on purpose -- it is what an
+    outside attacker who knew the shipped default secret computed, and it is
+    also what section [10]'s house uses to grind a round id after seeing the
+    bet. Neither works any more; that is the point of running them."""
     server_seed = hmac.new(secret.encode(), round_id.encode(), hashlib.sha256).hexdigest()
     mix = f"{client_seed}:{nonce}".encode()
     digest = hmac.new(server_seed.encode(), mix, hashlib.sha256).digest()
@@ -116,15 +130,29 @@ def predict_with_secret(game: str, round_id: str, client_seed: str, nonce: int,
 
 
 def attacker_predict(game: str, round_id: str, client_seed: str, nonce: int) -> str:
-    return predict_with_secret(game, round_id, client_seed, nonce, DEFAULT_SECRET)
+    return derived_seed_outcome(game, round_id, client_seed, nonce, DEFAULT_SECRET)
 
 
-def true_outcome(game: str, round_id: str, client_seed: str, nonce: int) -> str:
-    """What the round WILL actually resolve to, using whatever real secret
-    is currently configured -- used below to construct deterministic
-    winning/losing bets, never to attack anything."""
-    return predict_with_secret(game, round_id, client_seed, nonce,
-                                os.environ["NOLA_GAME_SEED_SECRET"])
+def true_outcome(round_id: str) -> str:
+    """What an ALREADY-OPENED round will actually resolve to, as a selection
+    string -- used below to construct deterministic winning/losing bets,
+    never to attack anything.
+
+    It reads the committed seed straight out of `game_commitments` and calls
+    the module's own draw. That is exactly the power the house holds between
+    commit and reveal, and exactly why the commitment has to be published
+    before the stake is accepted -- a house that can also CHOOSE the seed at
+    that moment can choose the outcome.
+    """
+    with db.db() as c:
+        row = c.execute(
+            "SELECT gc.server_seed AS seed, gr.game AS game, "
+            "       gr.client_seed AS client_seed, gr.nonce AS nonce "
+            "  FROM game_rounds gr JOIN game_commitments gc "
+            "    ON gc.id = gr.commitment_id WHERE gr.id = ?", (round_id,)
+        ).fetchone()
+    outcome = games._outcome(row["game"], row["seed"], row["client_seed"], row["nonce"])
+    return outcome["face"] if row["game"] == "coinflip" else str(outcome["roll"])
 
 
 _saved_secret = os.environ.get("NOLA_GAME_SEED_SECRET")
@@ -132,8 +160,8 @@ _saved_secret = os.environ.get("NOLA_GAME_SEED_SECRET")
 os.environ.pop("NOLA_GAME_SEED_SECRET", None)
 raises("configure() refuses to boot when NOLA_GAME_SEED_SECRET is unset",
        games.SeedSecretError, games.configure)
-raises("_server_seed_for is refused too, not just the boot check -- a caller "
-       "that skips configure() still cannot get an insecure round played",
+raises("open_round is refused too, not just the boot check -- a caller that "
+       "skips configure() still cannot get a round played on a misdeployed casino",
        games.SeedSecretError, games.open_round, "coinflip", "attacker-seed", 0)
 
 os.environ["NOLA_GAME_SEED_SECRET"] = DEFAULT_SECRET
@@ -181,9 +209,16 @@ check(f"with a real secret configured, guessing the old default secret only "
 
 
 # ============================================================================
-# ATTACK 1b -> DEFENSE: secret rotation mid-flight no longer strands funds
+# ATTACK 1b -> DEFENSE: a round whose commitment is gone voids and refunds
+#
+# This used to attack secret ROTATION between open_round and settle_round --
+# meaningful only while the server seed was DERIVED from the process secret.
+# The seed is now random and stored at commit time, so rotating the env var
+# is harmless. What can still leave a round with no recoverable seed is the
+# commitment row itself being missing, and that must still void and refund
+# rather than raise, invent a seed, or strand the hold.
 # ============================================================================
-print("\n[1b] secret changes between open_round and settle_round")
+print("\n[1b] a round whose commitment row is gone: void + full refund")
 reset()
 money.mint("u:71", 1000, service="owner", reason="seed")
 age_wallet("u:71")
@@ -198,14 +233,34 @@ rid = games.open_round("coinflip", "x", 0)
 games.place_bet(rid, "u:71", "heads", 100)
 coins_before = money.balance("u:71").coins
 
+# Rotating the secret is now a no-op for an open round: the seed was random
+# and is already stored. Settling must still work normally afterwards.
 os.environ["NOLA_GAME_SEED_SECRET"] = SECRET_B   # simulates an unpersisted restart
-result_after_rotation = games.settle_round(rid)  # DEFENSE: does not raise
+with db.db() as c:
+    seed_survives = c.execute(
+        "SELECT COUNT(*) AS n FROM game_commitments gc "
+        "JOIN game_rounds gr ON gr.commitment_id = gc.id "
+        "WHERE gr.id = ? AND gc.server_seed IS NOT NULL", (rid,)
+    ).fetchone()["n"]
+check("the committed seed is STORED, so rotating NOLA_GAME_SEED_SECRET "
+      "mid-flight can no longer lose a round's seed", seed_survives == 1,
+      f"seed_survives={seed_survives}")
 
-check("settling under a rotated secret does NOT raise -- it voids the round",
-      result_after_rotation.get("voided") is True, f"{result_after_rotation}")
-check("the void reason names the env var responsible",
-      "NOLA_GAME_SEED_SECRET" in result_after_rotation.get("reason", ""),
-      f"{result_after_rotation}")
+# Now the case that genuinely leaves no recoverable seed: the commitment row
+# is gone. There is no fair outcome to compute and never will be -- inventing
+# one at settlement is exactly the after-the-fact selection this scheme exists
+# to prevent -- so the round must void and refund in full.
+with db.db() as c:
+    c.execute(
+        "DELETE FROM game_commitments WHERE id = "
+        "(SELECT commitment_id FROM game_rounds WHERE id = ?)", (rid,))
+result_no_commitment = games.settle_round(rid)   # DEFENSE: does not raise
+
+check("settling a round whose commitment is gone does NOT raise -- it voids",
+      result_no_commitment.get("voided") is True, f"{result_no_commitment}")
+check("the void reason names the commitment responsible",
+      "commitment" in result_no_commitment.get("reason", ""),
+      f"{result_no_commitment}")
 check("the player's hold was released, not stuck -- nothing held any more",
       money.balance("u:71").held == 0, f"held={money.balance('u:71').held}")
 check("the player's coin balance is exactly what it was before the bet -- a "
@@ -278,7 +333,7 @@ round_ids2: list[str] = []
 for i in range(n_rounds):
     rid = games.open_round("coinflip", f"day-cap-lose-{i}", i)
     try:
-        winner = true_outcome("coinflip", rid, f"day-cap-lose-{i}", i)
+        winner = true_outcome(rid)
         losing_selection = "tails" if winner == "heads" else "heads"
         games.place_bet(rid, "u:61", losing_selection, bet_amount)   # guaranteed loser
         round_ids2.append(rid)
@@ -421,7 +476,7 @@ for j in range(91, 95):
     age_wallet(f"u:{j}")
 
 rid4 = games.open_round("coinflip", "crash-mid-payout", 0)
-predicted4 = true_outcome("coinflip", rid4, "crash-mid-payout", 0)  # the ACTUAL winner
+predicted4 = true_outcome(rid4)                       # the ACTUAL winner
 # four winners guarantees money.transfer() is called at least twice
 for j in range(90, 95):
     games.place_bet(rid4, f"u:{j}", predicted4, 100)
@@ -742,7 +797,7 @@ money.mint("u:701", 100_000, service="owner", reason="seed")
 age_wallet("u:701")
 
 rid7b = games.open_round("coinflip", "insolvent-win", 0)
-winner7b = true_outcome("coinflip", rid7b, "insolvent-win", 0)
+winner7b = true_outcome(rid7b)
 games.place_bet(rid7b, "u:701", winner7b, 100)   # profit_if_win=96 <= 100 available: passes the pre-check
 
 # Drain the treasury out from under the round directly -- standing in for a
@@ -848,8 +903,13 @@ games.place_bet(rid8b, "u:801", "heads", 4_000)   # exactly fills the remaining 
 check("a bet that exactly fills the remaining SHARED daily-loss room is accepted",
       money.balance("u:801").held == 4_000)
 
-# 8c: an OPEN position of one kind must not gate the other kind (finding 5) --
-# only realized (settled) loss is shared; open exposure is scoped per kind.
+# 8c: cross-kind open exposure.
+#
+# SLICE NOTE: which answer is correct here belongs to the wagering-cap slice,
+# which is landing in parallel (SLICE_CONTRACT.md sec 5 makes exposure
+# wallet-wide and deletes wagering._EXPOSURE_JOIN). This file is owned by the
+# fairness slice, so it asserts whichever contract core/wagering.py actually
+# ships, and asserts it strictly -- it never just accepts both outcomes.
 reset()
 money.mint("u:803", 1_000_000, service="owner", reason="seed")
 age_wallet("u:803")
@@ -859,20 +919,34 @@ for i in range(4):
 check("this subject now has 18,000 in OPEN prediction exposure",
       money.balance("u:803").held == 18_000)
 
+_per_kind_exposure = hasattr(wagering, "_EXPOSURE_JOIN")
 rid8c = games.open_round("coinflip", "cross-kind-exposure", 0)
-games.place_bet(rid8c, "u:803", "heads", 4_000)
-check("an open prediction position does NOT lock this subject out of the casino: "
-      "a casino bet adding only 4,000 of its OWN exposure is accepted even though "
-      "combined open exposure across both kinds is 22,000 (over MAX_DAILY_LOSS)",
-      money.balance("u:803").held == 18_000 + 4_000,
-      f"held={money.balance('u:803').held}")
-
-mkt8c2 = predictions.open_market("cross-kind reverse", ["yes", "no"], created_by="owner")
-predictions.stake(mkt8c2, "u:803", "yes", 1_000)
-check("the reverse holds too: an open casino position does not lock this subject "
-      "out of predictions either",
-      money.balance("u:803").held == 18_000 + 4_000 + 1_000,
-      f"held={money.balance('u:803').held}")
+if _per_kind_exposure:
+    games.place_bet(rid8c, "u:803", "heads", 4_000)
+    check("(per-kind exposure) an open prediction position does not lock this "
+          "subject out of the casino",
+          money.balance("u:803").held == 18_000 + 4_000,
+          f"held={money.balance('u:803').held}")
+    mkt8c2 = predictions.open_market("cross-kind reverse", ["yes", "no"], created_by="owner")
+    predictions.stake(mkt8c2, "u:803", "yes", 1_000)
+    check("(per-kind exposure) the reverse holds too",
+          money.balance("u:803").held == 18_000 + 4_000 + 1_000,
+          f"held={money.balance('u:803').held}")
+else:
+    raises("(wallet-wide exposure) a casino bet that would push COMBINED open "
+           "exposure over MAX_DAILY_LOSS is refused, even though every open "
+           "position so far is a prediction",
+           games.DailyLossExceeded, games.place_bet, rid8c, "u:803", "heads", 4_000)
+    games.place_bet(rid8c, "u:803", "heads", 2_000)   # exactly fills the wallet-wide room
+    check("(wallet-wide exposure) a casino bet that exactly fills the remaining "
+          "wallet-wide room is accepted, and combined exposure never exceeds "
+          f"MAX_DAILY_LOSS ({games.MAX_DAILY_LOSS:,})",
+          money.balance("u:803").held == 20_000 <= games.MAX_DAILY_LOSS,
+          f"held={money.balance('u:803').held}")
+    mkt8c2 = predictions.open_market("cross-kind reverse", ["yes", "no"], created_by="owner")
+    raises("(wallet-wide exposure) and the reverse: an open casino position "
+           "counts against a later prediction stake too",
+           predictions.WagerRefused, predictions.stake, mkt8c2, "u:803", "yes", 1_000)
 
 
 # ============================================================================
@@ -947,6 +1021,253 @@ with db.db() as c:
     ).fetchone()["n"]
 check("re-voiding an already-voided market (nothing released) adds no audit row",
       n9v == 1, f"{n9v}")
+
+
+# ============================================================================
+# ATTACK 10: THE fairness attack -- the commitment must be minted and
+# published BEFORE the bet is known, the client seed must be the PLAYER's,
+# and verify() must audit that pre-bet artifact.
+#
+# The defect: the server seed was HMAC(process secret, round_id) and the
+# round id was chosen by the house AFTER the bet was on the table, while the
+# "client seed" was itself server-generated. So the house could grind round
+# ids until the outcome suited it -- and verify() recomputed the commitment
+# hash from the very round it was validating, so it certified the rigged
+# round as VALID. Every round ever played was unverifiable after the fact.
+# ============================================================================
+print("\n[10] commit-first: the published hash predates the stake, the client")
+print("     seed is the player's, and verify() audits the pre-bet artifact")
+
+reset()
+money.mint("u:1000", 1_000_000, service="owner", reason="seed")
+age_wallet("u:1000")
+
+# --- 10a: the client seed is the PLAYER's. No default, no fallback. ---------
+for bad, label in ((None, "a missing"), ("", "an empty"),
+                   ("   ", "a whitespace-only"), (12345, "a non-string")):
+    raises(f"open_round refuses {label} client_seed -- there is no server-side "
+           f"default and no server-generated fallback anywhere in core/",
+           ValueError, games.open_round, "dice", bad)
+
+_rid_strip = games.open_round("dice", "  player typed this  ", 0)
+with db.db() as c:
+    _stored_cs = c.execute(
+        "SELECT client_seed FROM game_rounds WHERE id = ?", (_rid_strip,)
+    ).fetchone()["client_seed"]
+check("the player's seed is stored verbatim (stripped), never replaced by a "
+      "server value", _stored_cs == "player typed this", f"{_stored_cs!r}")
+
+# --- 10b: commit() publishes a hash, durably, before any stake -------------
+com = games.commit("u:1000")
+check("commit() returns a commitment id, a published hash and a starting nonce",
+      set(com) == {"commitment_id", "server_seed_hash", "next_nonce"}
+      and com["next_nonce"] == 0, f"{com}")
+check("commit() publishes ONLY the hash -- the seed itself is never returned",
+      "server_seed" not in com, f"{com}")
+
+_seen: dict[str, int] = {}
+
+
+def _other_connection_reader() -> None:
+    # A separate thread gets a separate sqlite connection, so this can only
+    # see the row if commit() really committed its own transaction.
+    with db.db() as c2:
+        row = c2.execute(
+            "SELECT server_seed, server_seed_hash, state, next_nonce "
+            "FROM game_commitments WHERE id = ?", (com["commitment_id"],)
+        ).fetchone()
+    _seen["found"] = 1 if row is not None else 0
+    _seen["hash_ok"] = 1 if (
+        row is not None
+        and hashlib.sha256(row["server_seed"].encode()).hexdigest() == row["server_seed_hash"]
+        and row["server_seed_hash"] == com["server_seed_hash"]
+    ) else 0
+    _seen["open"] = 1 if (row is not None and row["state"] == "open") else 0
+
+
+_t = threading.Thread(target=_other_connection_reader)
+_t.start()
+_t.join()
+check("the commitment is durable and readable from ANOTHER connection before "
+      "any stake is accepted -- that is what 'published' has to mean",
+      _seen.get("found") == 1 and _seen.get("open") == 1, f"{_seen}")
+check("the published hash really is sha256 of the stored seed",
+      _seen.get("hash_ok") == 1, f"{_seen}")
+
+# --- 10c: the house grinds round ids AFTER seeing the bet ------------------
+def house_grinds_a_losing_round_id(game: str, client_seed: str, selection: str,
+                                    nonce: int = 0) -> str:
+    """The house has already seen the player's bet. Under the old scheme the
+    seed was HMAC(process secret, round_id), so it mints candidate round ids
+    with the LIVE secret until it finds one that loses, and opens that one."""
+    secret = os.environ["NOLA_GAME_SEED_SECRET"]
+    for k in range(5_000):
+        candidate = f"round.{game}:grind-{client_seed}-{k}"
+        if derived_seed_outcome(game, candidate, client_seed, nonce, secret) != selection:
+            return candidate
+    raise AssertionError("no losing candidate found -- grinder is broken")
+
+
+GRIND_M = 30
+grind_losses = 0
+for i in range(GRIND_M):
+    cs = f"player-seed-{i}"
+    rigged = house_grinds_a_losing_round_id("coinflip", cs, "heads")
+    games.open_round("coinflip", cs, 0, round_id=rigged)
+    games.place_bet(rigged, "u:1000", "heads", 10)
+    if not games.settle_round(rigged)["results"][0]["win"]:
+        grind_losses += 1
+
+check(f"a house that grinds round ids AFTER seeing the bet cannot force a "
+      f"loss: {grind_losses}/{GRIND_M} losses, not {GRIND_M}/{GRIND_M} -- the "
+      f"seed is random and committed, so the round id decides nothing",
+      grind_losses < 0.8 * GRIND_M, f"grind_losses={grind_losses}/{GRIND_M}")
+
+# --- 10d: verify() audits the PRE-BET artifact ----------------------------
+reset()
+money.mint("u:1001", 1_000_000, service="owner", reason="seed")
+age_wallet("u:1001")
+
+rid10 = games.open_round("dice", "audit-me", 0)
+games.place_bet(rid10, "u:1001", "3", 10)
+games.settle_round(rid10)
+with db.db() as c:
+    cid10 = c.execute(
+        "SELECT commitment_id FROM game_rounds WHERE id = ?", (rid10,)
+    ).fetchone()["commitment_id"]
+
+v = games.verify(rid10)
+check("an honest round verifies with all four independent checks true",
+      v["seed_matches_commitment"] and v["commitment_matches_round"]
+      and v["committed_before_bets"] and v["outcome_matches"] and v["ok"], f"{v}")
+check("verify() names the commitment the round was played against",
+      v["commitment_id"] == cid10, f"{v['commitment_id']} vs {cid10}")
+
+# (i) the commitment was minted AFTER the bet was on the table
+with db.db() as c:
+    c.execute("UPDATE game_commitments SET created_at = "
+              "(SELECT datetime(MIN(placed_at), '+5 seconds') FROM game_bets "
+              " WHERE round_id = ?) WHERE id = ?", (rid10, cid10))
+v_late = games.verify(rid10)
+check("a commitment minted AFTER the first bet is REFUSED by verify -- this "
+      "is the rigged round the old verify() certified as VALID",
+      v_late["committed_before_bets"] is False and v_late["ok"] is False, f"{v_late}")
+
+# (ii) the house swaps the seed after the fact
+with db.db() as c:
+    c.execute("UPDATE game_commitments SET created_at = datetime('now', '-1 hour') "
+              "WHERE id = ?", (cid10,))
+    c.execute("UPDATE game_commitments SET server_seed = 'deadbeef' WHERE id = ?", (cid10,))
+v_swapped = games.verify(rid10)
+check("a commitment whose seed no longer hashes to its published hash fails "
+      "verification, and the round's copy no longer matches it either",
+      v_swapped["seed_matches_commitment"] is False
+      and v_swapped["commitment_matches_round"] is False
+      and v_swapped["ok"] is False, f"{v_swapped}")
+
+# (iii) no commitment at all
+with db.db() as c:
+    c.execute("UPDATE game_commitments SET server_seed = "
+              "(SELECT server_seed FROM game_rounds WHERE id = ?) WHERE id = ?",
+              (rid10, cid10))
+    c.execute("UPDATE game_rounds SET commitment_id = NULL WHERE id = ?", (rid10,))
+v_none = games.verify(rid10)
+check("a round with NO commitment artifact verifies as ok=False, not as a "
+      "round that happens to recompute consistently with itself",
+      v_none["commitment_id"] is None
+      and v_none["commitment_matches_round"] is False
+      and v_none["outcome_matches"] is True     # it is self-consistent...
+      and v_none["ok"] is False,                # ...and that is not enough
+      f"{v_none}")
+
+# --- 10e: the nonce is monotonic per commitment ---------------------------
+reset()
+money.mint("u:1002", 1_000_000, service="owner", reason="seed")
+age_wallet("u:1002")
+
+cid_n = games.commit()["commitment_id"]
+games.open_round("dice", "nonce-test", 0, commitment_id=cid_n)
+raises("a nonce is never REUSED on one commitment",
+       games.RoundNotOpen, games.open_round, "dice", "nonce-test", 0,
+       commitment_id=cid_n)
+games.open_round("dice", "nonce-test", 5, commitment_id=cid_n)
+raises("a nonce is never REWOUND on one commitment",
+       games.RoundNotOpen, games.open_round, "dice", "nonce-test", 3,
+       commitment_id=cid_n)
+games.open_round("dice", "nonce-test", 6, commitment_id=cid_n)   # forward is fine
+raises("an unknown commitment id is refused, never silently minted",
+       games.UnknownRound, games.open_round, "dice", "nonce-test", 0,
+       commitment_id="commit:does-not-exist")
+
+# --- 10f: a revealed commitment accepts no further bets -------------------
+cid_r = games.commit()["commitment_id"]
+r_first = games.open_round("coinflip", "reveal-test", 0, commitment_id=cid_r)
+r_second = games.open_round("coinflip", "reveal-test", 1, commitment_id=cid_r)
+games.place_bet(r_first, "u:1002", "heads", 10)
+games.settle_round(r_first)                      # reveals the seed publicly
+raises("once a commitment is revealed its seed is public, so a bet on another "
+       "round sharing it is refused -- never a bet on a known outcome",
+       games.RoundNotOpen, games.place_bet, r_second, "u:1002", "heads", 10)
+raises("and no new round may be opened against a revealed commitment",
+       games.RoundNotOpen, games.open_round, "coinflip", "reveal-test", 2,
+       commitment_id=cid_r)
+
+
+# ============================================================================
+# ATTACK 11: the dice draw itself. `digest[0] % 6` is not uniform -- 256 is
+# not a multiple of 6, so faces 1-4 came up 43/256 and faces 5-6 42/256. The
+# real house edge was 4.26% on four faces and 6.48% on two, while GAME_CONFIG
+# says 5%. CONTRACT.md section 9: the edge is an explicit config number,
+# never an emergent property of the payout maths.
+# ============================================================================
+print("\n[11] dice uniformity: every face exactly 1/6, so the edge is the")
+print("     config number and not an artifact of the draw")
+
+N_DIST = 1_000_000
+DIST_SEED = "b" * 64
+
+counts = [0] * 6
+for i in range(N_DIST):
+    counts[games._uniform_int(DIST_SEED, "dist", i, 6)] += 1
+expected = N_DIST / 6
+chi2 = sum((n - expected) ** 2 / expected for n in counts)
+check(f"chi-square over {N_DIST:,} dice draws is {chi2:.2f} < 30 (df=5; a fair "
+      f"generator scores ~5, and P(chi2 > 30) ~ 1.5e-5)",
+      chi2 < 30, f"chi2={chi2:.2f} counts={counts}")
+
+old_counts = [0] * 6
+for i in range(N_DIST):
+    d = hmac.new(DIST_SEED.encode(), f"dist:{i}".encode(), hashlib.sha256).digest()
+    old_counts[d[0] % 6] += 1
+old_chi2 = sum((n - expected) ** 2 / expected for n in old_counts)
+check(f"the test DISCRIMINATES: the old digest[0] % 6 draw scores "
+      f"chi2 = {old_chi2:.2f} on the same sample size, far past the same "
+      f"threshold this check uses",
+      old_chi2 > 100, f"old_chi2={old_chi2:.2f} counts={old_counts}")
+
+coin_counts = [0, 0]
+for i in range(100_000):
+    coin_counts[games._uniform_int(DIST_SEED, "coin", i, 2)] += 1
+coin_chi2 = sum((n - 50_000) ** 2 / 50_000 for n in coin_counts)
+check(f"coinflip is uniform too (chi2 = {coin_chi2:.2f} < 11 on df=1)",
+      coin_chi2 < 11, f"coin_chi2={coin_chi2:.2f} counts={coin_counts}")
+
+# The edge is the config number, for EVERY face -- not 4.26% on four of them
+# and 6.48% on the other two.
+_dice_payout = games.GAME_CONFIG["dice"]["payout_bps"] / 10_000     # 5.70x
+_true_edges = [1 - _dice_payout * (n / N_DIST) for n in counts]
+check(f"every dice face carries the configured 5% edge (measured "
+      f"{min(_true_edges):.4f}..{max(_true_edges):.4f}), rather than the "
+      f"4.26%/6.48% split the biased draw produced",
+      all(abs(e - 0.05) < 0.005 for e in _true_edges),
+      f"edges={[round(e, 5) for e in _true_edges]}")
+check("with p exactly 1/6 the arithmetic edge is exactly the config number",
+      abs((1 - _dice_payout / 6) - 0.05) < 1e-12, f"{1 - _dice_payout / 6}")
+check("...and the OLD probabilities really were 4.26%/6.48%, which is the "
+      "defect this section closes",
+      abs((1 - _dice_payout * 43 / 256) - 0.0426) < 5e-5
+      and abs((1 - _dice_payout * 42 / 256) - 0.0648) < 5e-5,
+      f"{1 - _dice_payout * 43 / 256} {1 - _dice_payout * 42 / 256}")
 
 
 # ============================================================================

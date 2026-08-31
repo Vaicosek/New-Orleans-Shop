@@ -94,6 +94,29 @@ def split_charge(pieces_per_claim: list[int], price_coins: int,
     return payouts
 
 
+def money_text(amount: int, *, sign: bool = False) -> str:
+    """A bare money amount in the shop's one currency: '300 g'.
+
+    The symbol comes from CURRENCY and is printed AFTER the number, always.
+    This is the ONE formatter for a bare amount: `bot.ui.embed.money_text`
+    delegates here, and `web/` calls it directly (it cannot import
+    `bot.ui.embed`, which pulls in discord). A bare number with no unit is
+    a bug, not a style choice -- CONTRACT.md section 5.
+
+    `sign=True` prefixes '+' for a positive amount (a negative already
+    carries its own '-'), for ledger delta columns. Never returns a bare
+    number.
+
+    >>> money_text(300)
+    '300 g'
+    >>> money_text(500, sign=True)
+    '+500 g'
+    """
+    _require_int(amount, "amount")
+    text = f"{amount:,} {CURRENCY}"
+    return f"+{text}" if sign and amount > 0 else text
+
+
 def per_piece_text(price_coins: int, unit_pieces: int = STACK) -> str:
     """The per-piece figure as display text, two decimals, for labelling only.
 

@@ -99,17 +99,33 @@ class RoundVerifyView(discord.ui.View):
 
 
 class _BetModal(discord.ui.Modal):
-    """The bet amount is genuinely free text (a quantity); game and
-    selection are already resolved by the two pickers before this opens."""
+    """The bet amount and the player's own seed are genuinely free text; game
+    and selection are already resolved by the two pickers before this opens.
 
-    def __init__(self, game: str, selection: str, subject: str):
+    The seed the player types IS the client seed, verbatim. It used to be
+    `f"{subject}:{interaction.id}"` -- a value the house picked -- which made
+    the "provably fair" round unprovable: with both seeds under the house's
+    control there is nothing the player contributed to check against. The
+    commitment this modal was opened under (`commitment_id`) was published to
+    the player, hash and all, before the modal appeared.
+    """
+
+    def __init__(self, game: str, selection: str, subject: str,
+                 commitment_id: str | None = None):
         super().__init__(title=f"Bet: {GAME_LABELS.get(game, game)}"[:45], timeout=300)
         self.game, self.selection, self.subject = game, selection, subject
+        self.commitment_id = commitment_id
         self.amount = discord.ui.TextInput(
             label=f"Amount (g, max {games.MAX_BET:,})",
             placeholder="e.g. 50", max_length=10, required=True,
         )
+        self.client_seed = discord.ui.TextInput(
+            label="Your seed",
+            placeholder="any words you like -- yours, not ours",
+            max_length=64, required=True,
+        )
         self.add_item(self.amount)
+        self.add_item(self.client_seed)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
@@ -121,9 +137,17 @@ class _BetModal(discord.ui.Modal):
             await interaction.followup.send("Amount must be a positive whole number.", ephemeral=True)
             return
 
-        client_seed = f"{self.subject}:{interaction.id}"
+        client_seed = str(self.client_seed.value).strip()
+        if not client_seed:
+            await interaction.followup.send(
+                "Your seed cannot be blank -- it is the half of the draw that is yours.",
+                ephemeral=True,
+            )
+            return
+
         try:
-            result = games.play(self.subject, self.game, self.selection, amount, client_seed)
+            result = games.play(self.subject, self.game, self.selection, amount,
+                                client_seed, commitment_id=self.commitment_id)
         except games.GameError as err:
             await interaction.followup.send(f"Could not place that bet: {err}", ephemeral=True)
             return
@@ -153,13 +177,29 @@ class CasinoPanelView(discord.ui.View):
         async def game_picked(inter: discord.Interaction, game: str) -> None:
             selection_options = SELECTION_LABELS[game]
 
+            # Publish the commitment BEFORE the stake is known. `commit()`
+            # writes its own transaction, so the hash below is durable and
+            # auditable the moment the player reads it -- which is the whole
+            # point: a hash shown after the bet proves nothing.
+            try:
+                published = games.commit(money.user(self.owner_id))
+            except Exception as err:  # noqa: BLE001 -- refuse the round, don't half-open it
+                await inter.response.send_message(
+                    f"Could not open a round right now: {err}", ephemeral=True
+                )
+                return
+
             async def selection_picked(inter2: discord.Interaction, selection: str) -> None:
                 await inter2.response.send_modal(
-                    _BetModal(game, selection, money.user(self.owner_id))
+                    _BetModal(game, selection, money.user(self.owner_id),
+                              published["commitment_id"])
                 )
 
             await inter.response.send_message(
-                f"Pick your {GAME_LABELS[game].lower()} selection:",
+                f"Pick your {GAME_LABELS[game].lower()} selection.\n"
+                f"Committed before you stake {SEP} server_seed_hash: "
+                f"`{published['server_seed_hash']}`\n"
+                f"Check it against the revealed seed with Verify after the round.",
                 view=pickers.OptionPickerView(self.owner_id, selection_options, selection_picked),
                 ephemeral=True,
             )
