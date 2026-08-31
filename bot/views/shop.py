@@ -129,7 +129,7 @@ class _QuantityModal(discord.ui.Modal):
 
 
 # The site's own address. Not a config value: it is the one place this shop
-# lives and it is already in CONTRACT.md section 10 and on the domain itself,
+# lives and it is already in CONTRACT.md section 11 and on the domain itself,
 # so an env var would be a setting nobody would ever change and one more thing
 # that can be blank at boot.
 SITE_URL = "https://neworleansshop.org/"

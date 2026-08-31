@@ -12,11 +12,13 @@ import secrets
 
 import discord
 
-from core import alerts, audit, catalog, db, money, predictions, pricing
+from core import alerts, audit, auctions as auctions_core, catalog, db, money, predictions, pricing
 
 from .. import addressing
 
+from . import auctions as auction_views
 from . import pickers
+from .. import layout
 from .. import permissions
 from ..permissions import is_staff
 from ..ui.embed import money_text, panel_embed, price_line, rows
@@ -494,6 +496,99 @@ class _VoidConfirmModal(discord.ui.Modal):
         )
 
 
+class _OpenAuctionModal(discord.ui.Modal):
+    """Duration, pieces, minimum bid and minimum raise are all free-text
+    quantities -- the lot itself is already resolved by the item picker
+    that opens this modal, never typed."""
+
+    def __init__(self, item: dict, config):
+        super().__init__(title=f"Auction: {item['name']}"[:45], timeout=300)
+        self.item = item
+        self.config = config
+        self.pieces = discord.ui.TextInput(label="Pieces", placeholder="e.g. 64", max_length=8)
+        self.min_bid = discord.ui.TextInput(label="Minimum bid (g)", placeholder="e.g. 500", max_length=10)
+        self.min_increment = discord.ui.TextInput(
+            label="Minimum raise (g)", placeholder="e.g. 50", max_length=10)
+        self.duration = discord.ui.TextInput(
+            label="Duration, in minutes", placeholder="e.g. 1440 (24h)", max_length=6)
+        for field in (self.pieces, self.min_bid, self.min_increment, self.duration):
+            self.add_item(field)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        try:
+            pieces = int(str(self.pieces.value).strip())
+            min_bid = int(str(self.min_bid.value).strip())
+            min_increment = int(str(self.min_increment.value).strip())
+            duration_minutes = int(str(self.duration.value).strip())
+        except ValueError:
+            await interaction.followup.send("Every field must be a whole number.", ephemeral=True)
+            return
+        try:
+            auction_id = auctions_core.open_auction(
+                self.item["id"], pieces, min_bid, min_increment, duration_minutes,
+                created_by=money.user(interaction.user.id),
+            )
+        except auctions_core.AuctionError as err:
+            await interaction.followup.send(f"Could not open that auction: {err}", ephemeral=True)
+            return
+
+        # Post the card BEFORE telling staff it's done, same reasoning as
+        # bot/views/shop.py's order card: the auction itself already exists
+        # and is settleable even if the public card never posts -- only the
+        # card is at risk here.
+        channel = layout.channel(interaction.client, self.config, "channel:auctions")
+        post_note = ""
+        if channel is None:
+            post_note = (" Could not find the auctions channel to post a public card -- "
+                         "the auction still exists and will still settle on time.")
+        else:
+            try:
+                embed = auction_views.build_auction_embed(auction_id)
+                posted = await channel.send(embed=embed, view=auction_views.AuctionCardView())
+            except discord.HTTPException as err:
+                post_note = f" Could not post the public card ({err})."
+            else:
+                if posted is not None:
+                    auctions_core.set_message(auction_id, str(channel.id), str(posted.id))
+                    post_note = " Posted in the auctions channel."
+
+        await interaction.followup.send(
+            f"Opened auction #{auction_id}: {pieces} × {self.item['name']}, "
+            f"minimum bid {money_text(min_bid)}, closes in {duration_minutes} "
+            f"minute(s).{post_note}",
+            ephemeral=True,
+        )
+
+
+class _VoidAuctionConfirmModal(discord.ui.Modal):
+    """Typed confirmation for an irreversible refund: the auctioned item's
+    own NAME -- never the auction's id."""
+
+    def __init__(self, auction: dict, voider: str):
+        super().__init__(title="Confirm void", timeout=300)
+        self.auction = auction
+        self.voider = voider
+        self.confirm = discord.ui.TextInput(
+            label=f"Type the item name: {auction['item_name']}"[:45],
+            placeholder="Type it exactly as shown above", max_length=100,
+        )
+        self.add_item(self.confirm)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        if str(self.confirm.value).strip().lower() != self.auction["item_name"].strip().lower():
+            await interaction.followup.send("Item name didn't match · void cancelled.", ephemeral=True)
+            return
+        try:
+            auctions_core.void(self.auction["id"], actor=self.voider)
+        except (auctions_core.AuctionError, money.MoneyError) as err:
+            await interaction.followup.send(f"Could not void: {err}", ephemeral=True)
+            return
+        await interaction.followup.send(
+            f"Voided auction #{self.auction['id']} ({self.auction['item_name']}).", ephemeral=True)
+
+
 class AdminPanelView(_StaffGatedView):
     @discord.ui.button(label="Add item", style=discord.ButtonStyle.primary)
     async def add_item(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
@@ -645,6 +740,40 @@ class AdminPanelView(_StaffGatedView):
             ephemeral=True,
         )
 
+    @discord.ui.button(label="Open auction", style=discord.ButtonStyle.primary, row=1)
+    async def open_auction(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        async def picked(inter: discord.Interaction, item: dict) -> None:
+            await inter.response.send_modal(_OpenAuctionModal(item, self.config))
+
+        await interaction.response.send_message(
+            "Pick an item to auction:",
+            view=pickers.ItemPickerView(self.owner_id, picked, active_only=False),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Void auction", style=discord.ButtonStyle.secondary, row=1)
+    async def void_auction(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        auctions = queries.list_open_auctions(limit=25)
+        options = [(f"{a['item_name']} (#{a['id']})"[:100], str(a["id"])) for a in auctions]
+
+        async def picked(inter: discord.Interaction, auction_id_str: str) -> None:
+            if auction_id_str == "_none":
+                await inter.response.send_message("No auctions to void.", ephemeral=True)
+                return
+            auction = queries.get_auction_detail(int(auction_id_str))
+            await inter.response.send_message(
+                f"Voiding \"{auction['item_name']}\" refunds the current bid in full. "
+                "This cannot be undone.",
+                view=_VoidAuctionGate(auction, money.user(inter.user.id)),
+                ephemeral=True,
+            )
+
+        await interaction.response.send_message(
+            "Pick an auction to void:",
+            view=pickers.OptionPickerView(self.owner_id, options, picked),
+            ephemeral=True,
+        )
+
     @discord.ui.button(label="Treasury", style=discord.ButtonStyle.secondary, row=2)
     async def treasury(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
         await interaction.response.defer(ephemeral=True)
@@ -768,3 +897,14 @@ class _VoidGate(discord.ui.View):
     @discord.ui.button(label="Confirm void", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
         await interaction.response.send_modal(_VoidConfirmModal(self.market, self.voider))
+
+
+class _VoidAuctionGate(discord.ui.View):
+    def __init__(self, auction: dict, voider: str) -> None:
+        super().__init__(timeout=120)
+        self.auction = auction
+        self.voider = voider
+
+    @discord.ui.button(label="Confirm void", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        await interaction.response.send_modal(_VoidAuctionConfirmModal(self.auction, self.voider))

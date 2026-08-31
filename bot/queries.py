@@ -135,3 +135,47 @@ def list_user_bets(subject: str, *, limit: int = 10) -> list[dict[str, Any]]:
             (subject, limit),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def get_auction_detail(auction_id: int) -> Optional[dict[str, Any]]:
+    """One auction plus its item name and current leading bid (if any). The
+    leader is read the same way core/auctions.py's `_leading_bid` reads it --
+    the single `status = 'active'` row -- so the card can never show a
+    different leader than the one settle() would actually pay."""
+    with db_in() as c:
+        row = c.execute(
+            "SELECT a.*, i.name AS item_name FROM auctions a "
+            "JOIN items i ON i.id = a.item_id WHERE a.id = ?",
+            (auction_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        d = dict(row)
+        leader = c.execute(
+            "SELECT subject, amount FROM auction_bids "
+            "WHERE auction_id = ? AND status = 'active' "
+            "ORDER BY amount DESC, id ASC LIMIT 1",
+            (auction_id,),
+        ).fetchone()
+        d["leader_subject"] = leader["subject"] if leader else None
+        d["leader_amount"] = leader["amount"] if leader else None
+        d["bid_count"] = c.execute(
+            "SELECT COUNT(*) AS n FROM auction_bids WHERE auction_id = ?", (auction_id,)
+        ).fetchone()["n"]
+    return d
+
+
+def list_open_auctions(*, include_closed: bool = True, limit: int = 25) -> list[dict[str, Any]]:
+    """Auctions still reachable for staff action (voiding): open, and closed-
+    but-not-yet-swept. Settled and voided auctions are excluded -- there is
+    nothing left to do to them from here."""
+    statuses = ("open", "closed") if include_closed else ("open",)
+    placeholders = ",".join("?" for _ in statuses)
+    with db_in() as c:
+        rows = c.execute(
+            f"SELECT a.id, a.item_id, i.name AS item_name FROM auctions a "
+            f"JOIN items i ON i.id = a.item_id "
+            f"WHERE a.status IN ({placeholders}) ORDER BY a.created_at DESC LIMIT ?",
+            (*statuses, limit),
+        ).fetchall()
+    return [dict(r) for r in rows]

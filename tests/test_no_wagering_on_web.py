@@ -23,7 +23,7 @@ source text:
    under `web/` reached it, directly or through any number of hops.
 
 2. ROUTE ALLOWLIST. `create_app()` is actually called and `app.router` is
-   actually enumerated. Every registered path must be one CONTRACT.md S10
+   actually enumerated. Every registered path must be one CONTRACT.md S11
    names. A route nobody put in the contract -- `/rounds`, say -- fails here
    even if its handler, its imports and its template text are all otherwise
    clean.
@@ -75,7 +75,7 @@ BANNED_WORDS = re.compile(
 # (CONTRACT.md S4, S9). Nothing reachable from web/ may import either.
 BANNED_CORE_MODULES = ("core.games", "core.predictions")
 
-# CONTRACT.md S10 -- the entire, exact route surface this website may serve.
+# CONTRACT.md S11 -- the entire, exact route surface this website may serve.
 ALLOWED_ROUTES = {
     "/health", "/login", "/auth/callback", "/logout",
     # /inventory is the page's name; /stock is the name it had before the
@@ -134,7 +134,7 @@ check("no module reachable from web/ imports core.games or core.predictions "
       "direct one)",
       not reached_betting_core, ", ".join(sorted(reached_betting_core)))
 
-print("\nenumerating app.router against the CONTRACT.md S10 allowlist")
+print("\nenumerating app.router against the CONTRACT.md S11 allowlist")
 try:
     from web.server import create_app
     app = create_app()
@@ -145,10 +145,10 @@ try:
     }
     unexpected = registered - ALLOWED_ROUTES
     missing = ALLOWED_ROUTES - registered
-    check("app.router registers no route outside the CONTRACT.md S10 allowlist "
+    check("app.router registers no route outside the CONTRACT.md S11 allowlist "
           "(a page like /rounds fails here even if its own source is clean)",
           not unexpected, ", ".join(sorted(unexpected)))
-    check("every route CONTRACT.md S10 promises is actually registered",
+    check("every route CONTRACT.md S11 promises is actually registered",
           not missing, ", ".join(sorted(missing)))
 except Exception as err:  # noqa: BLE001
     check("create_app() builds and its routes can be enumerated", False,

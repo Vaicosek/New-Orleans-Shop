@@ -21,7 +21,7 @@ why every entrypoint calls this as its first statement instead of relying on
 import order to work out -- import order is exactly the kind of thing that
 holds until someone adds an import above yours.
 
-`.env` is gitignored and must stay that way: CONTRACT.md section 11 -- no
+`.env` is gitignored and must stay that way: CONTRACT.md section 12 -- no
 token, webhook, secret or access-granting id is ever committed to this repo.
 """
 from __future__ import annotations

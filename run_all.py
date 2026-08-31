@@ -5,7 +5,7 @@ This is the one operational thing AbexTech's `Restocker_main.py` does not
 have -- it runs directly under the host with nothing watching it, so a
 crash is a silent outage until someone notices Discord went quiet.
 
-What this does, per CONTRACT.md section 11:
+What this does, per CONTRACT.md section 12:
   - prefixed, unbuffered child output (`python -u`, one `[label] ...` line
     per line of child output, printed as it arrives)
   - exponential backoff between restarts

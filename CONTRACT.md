@@ -282,7 +282,42 @@ flag. Borrowed or held coins can never fund a wager.
 module under `web/` and fails if any of them references a betting table, route, nav entry or
 string — mirroring AbexTech's own `test_no_wagering_surface.py`, scoped to the website only.
 
-## 10. Website
+## 10. Auctions model
+
+**Public open-bid (English), not a wager.** A single winner pays the top bid; a bidder can
+never lose more than the price of the lot they actually win, which is exactly why auctions do
+**not** run through `core/wagering.py`'s `MAX_BET`/`MAX_DAILY_LOSS` guard (S9's guardrails are
+about capping real risk of loss, not every hold in the system) and do not touch
+`gambling_blocked`. Bidding is commerce, same family as an order: it is gated by the
+`orders_blocked` wallet flag instead, checked explicitly in `core/auctions.py::bid` since
+`money.place_hold`'s automatic gate only covers `money.GAMBLING_SERVICES`.
+
+**The first house-sells-to-player money flow.** Every other flow in this codebase pays the
+other direction: `orders.py` is a worker-cooperative production economy where `treasury:shop`
+pays workers, never the reverse. An auction's winning bid is captured *into* `treasury:shop`.
+Auctions never touch `stock.pieces` or `items.active` -- handing over the physical item is a
+manual staff task, exactly like an order's delivery; the `pieces` column on a listing is purely
+descriptive.
+
+**Lifecycle:** staff opens a lot against a real catalog item (never a typed name) with a
+minimum bid, minimum raise, and duration. Each bid places a fresh hold for its full amount;
+the moment a higher bid supersedes it, the previous leader's hold is released -- the new hold
+is always placed *before* the old one is released, so a challenger who cannot afford their bid
+never costs the current leader their escrow. When `closes_at` passes, the lot closes and
+settles automatically (a one-minute sweep loop in `bot/cogs/admin.py`): the winning hold is
+captured to `treasury:shop`, or the lot settles with no winner if nobody bid. Unlike a
+prediction market, an auction's outcome is the objective top bid at close, not a subjective
+staff call, so there is no insider-window risk in settling it the instant it closes and no
+staff "resolve" step exists. `void` (staff-only, pre-settlement) refunds the current leader in
+full and cancels the listing -- the escape hatch for a lot listed by mistake.
+
+**No new slash command.** Creation and voiding live in `/admin`, next to every other
+staff-only, money-deciding action. Bidding lives entirely on the auction's own persistent
+public card in the auctions channel -- a Bid button, an amount modal, and a confirm gate --
+mirroring `bot/views/orders.py`'s order card pattern down to resolving the auction id from the
+message's own embed footer rather than trusting `self`.
+
+## 11. Website
 
 **Domain: `neworleansshop.org`** (registered 31 Aug 2026). The `.com` is held by a
 parking service and was never an operating business; the name itself is not a
@@ -341,7 +376,7 @@ glow, gradients, Inter/Geist/Space Grotesk, monospace-for-vibe, CAPS eyebrow lab
 stat-card hero rows, three-card rows, bento grids, `~` approximated dates, subtitle sentences
 under headings, scroll fade-ins.
 
-## 11. Deploy
+## 12. Deploy
 
 Wispbyte panel. One startup command, no shell.
 
@@ -363,7 +398,7 @@ over the table when set. `DISCORD_TOKEN`, `GUILD_ID`, `NOLA_GAME_SEED_SECRET` an
 `.env` keys are documented in `docs/deploy.md` by NAME only. No token, webhook, secret or
 access-granting id is ever written into this repo or the brain.
 
-## 12. Reference market — read-only, and it stays that way
+## 13. Reference market — read-only, and it stays that way
 
 New Orleans mirrors one other server's public market so the owner can see what an item
 fetches somewhere with real volume before he sets a price here. Source: DiplomaticaMC's
@@ -423,7 +458,7 @@ view, health line) is built and tested against a real captured payload and will 
 moment a request gets through; the boot block's `reference market:` line reading
 `last success` is the only thing that counts as verification.
 
-## 13. Open — John decides
+## 14. Open — John decides
 
 1. ~~**Currency name.**~~ Decided and DONE: gold ingots, symbol `g`, whole numbers (S2, S5). The leftover `core.config.currency_name`/`CURRENCY_NAME` setting has been **removed** -- it is gone from `core/config.py` and no code reads it. Nothing is left for the integrator to retire here; the only surviving mention is a historical note in a `bot/ui/embed.py` docstring recording that an earlier version took the argument.
 2. ~~**Casino games beyond coinflip and dice.**~~ Decided and DONE: slots shipped (commit-reveal per-reel draws via `_uniform_int_positioned`, RTP 91.975%, edge 8.025%). Blackjack and roulette remain undecided -- real work, worth it only if people will actually play them.

@@ -1,11 +1,13 @@
-"""`/admin` -- the only admin-facing slash command, plus the two background
-loops: the restock-alert scan that posts to `ALERTS_CHANNEL_ID`, and the
-six-hourly pull of the reference market (CONTRACT.md section 13).
+"""`/admin` -- the only admin-facing slash command, plus the background
+loops: the restock-alert scan that posts to `ALERTS_CHANNEL_ID`, the
+six-hourly pull of the reference market (CONTRACT.md section 13), and the
+one-minute auction sweep that closes and settles any lot whose `closes_at`
+has passed.
 
-Both loops live here rather than in their own cogs because this host gives the
-project ONE process slot: a loop in a cog that failed to import is a loop that
-never runs, and keeping them beside the panel that reports their health means
-there is exactly one place to look when something has stopped.
+All three loops live here rather than in their own cogs because this host
+gives the project ONE process slot: a loop in a cog that failed to import is
+a loop that never runs, and keeping them beside the panel that reports their
+health means there is exactly one place to look when something has stopped.
 """
 from __future__ import annotations
 
@@ -15,12 +17,13 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-from core import alerts, refmarket
+from core import alerts, auctions, refmarket
 
 from .. import layout
 from ..permissions import is_staff
 from ..views.admin import AdminPanelView, build_admin_embed
 from ..views.alerts import AlertAckView, build_alert_embed
+from ..views.auctions import AuctionCardView, auction_card_view, build_auction_embed
 
 
 class AdminCog(commands.Cog):
@@ -32,10 +35,12 @@ class AdminCog(commands.Cog):
         self.last_scan_error: str | None = None
         self.scan_alerts.start()
         self.pull_reference_market.start()
+        self.sweep_auctions.start()
 
     def cog_unload(self) -> None:
         self.scan_alerts.cancel()
         self.pull_reference_market.cancel()
+        self.sweep_auctions.cancel()
 
     @app_commands.command(name="admin", description="Items, prices, thresholds, markets, treasury.")
     async def admin(self, interaction: discord.Interaction) -> None:
@@ -133,6 +138,54 @@ class AdminCog(commands.Cog):
         # somebody else's API must not do.
         await self.bot.wait_until_ready()
 
+
+    # ------------------------------------------------------------------
+    # Auctions. An auction's outcome is the objective top bid at close, not
+    # a staff judgement call the way a prediction market's resolve is, so
+    # there is no insider-window reason to make a human close and settle it
+    # by hand -- see core/auctions.py's module docstring. One minute is
+    # cheap (one indexed SELECT on a local db) and keeps a listed close time
+    # honest to within about that margin.
+    # ------------------------------------------------------------------
+    @tasks.loop(minutes=1)
+    async def sweep_auctions(self) -> None:
+        """`auctions.sweep_expired()` never raises past a single auction's
+        own close/settle -- but the try/except stays anyway, same reasoning
+        as every other loop here: a crash inside a `tasks.loop` dies
+        silently for the life of the process."""
+        try:
+            settled_ids = auctions.sweep_expired()
+        except Exception as err:            # noqa: BLE001 -- one sweep, not the process
+            print(f"[auctions] sweep raised: {err!r}", flush=True)
+            return
+        for auction_id in settled_ids:
+            await self._refresh_auction_card(auction_id)
+
+    async def _refresh_auction_card(self, auction_id: int) -> None:
+        """Edit the public card in place so bidders see the result without
+        anyone having to reopen it -- same reasoning as the bid confirm
+        gate's own card refresh in bot/views/auctions.py."""
+        from .. import queries
+        auction = queries.get_auction_detail(auction_id)
+        if auction is None or not auction.get("channel_id") or not auction.get("message_id"):
+            return
+        try:
+            channel = self.bot.get_channel(int(auction["channel_id"]))
+            if channel is None:
+                channel = await self.bot.fetch_channel(int(auction["channel_id"]))
+            message = await channel.fetch_message(int(auction["message_id"]))
+            await message.edit(embed=build_auction_embed(auction_id),
+                                view=auction_card_view(auction))
+        except discord.HTTPException as err:
+            print(f"[auctions] could not refresh card for auction {auction_id}: {err!r}", flush=True)
+
+    @sweep_auctions.error
+    async def sweep_auctions_error(self, err: BaseException) -> None:
+        print(f"[auctions] sweep loop crashed: {err!r} -- restarting", flush=True)
+
+    @sweep_auctions.before_loop
+    async def before_sweep(self) -> None:
+        await self.bot.wait_until_ready()
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(AdminCog(bot))
