@@ -60,6 +60,24 @@ command above fixes it without either.
 the brain — CONTRACT.md §11. The annotated list, with what each one does and how to
 generate it, is `.env.example`.
 
+### Where the values actually go
+
+The panel's Python egg exposes a fixed set of variables — there is no field
+to put `DISCORD_TOKEN` in, and no shell to export it from. So configuration
+is a **`.env` file in the project root**, created with the panel's file
+manager (Files → New File → `.env`), and read at startup by `core/env.py`.
+No dotenv dependency: it is forty lines of `KEY=VALUE` parsing.
+
+`.env` is gitignored and stays that way — which is also the answer to "why
+isn't there one in the repo". `.env.example` is the annotated template.
+
+**A variable already present in the real environment always wins over the
+file.** The file fills gaps; it never overrides the host. That way a value
+the panel injects cannot be silently shadowed by a stale line in a file
+nobody remembered was there — and the loader prints the name of anything it
+skipped for that reason, because "I set it in the file and nothing changed"
+is otherwise an unfindable half-hour.
+
 Required before the first boot:
 
 | Name | Missing means |
@@ -72,6 +90,22 @@ Required before the first boot:
 Website only — the public pages work without these, but the sign-in button does not
 appear: `NOLA_DISCORD_CLIENT_ID`, `NOLA_DISCORD_CLIENT_SECRET`,
 `NOLA_DISCORD_REDIRECT_URI`, `NOLA_STAFF_DISCORD_IDS`.
+
+## Running the tests
+
+    python run_tests.py
+
+**Not `pytest`.** Every file in `tests/` is a script that runs its checks at
+import and exits non-zero on failure, and that shape is load-bearing:
+`test_no_wagering_on_web.py` asserts that nothing reachable from `web/` has
+pulled `core.games` or `core.predictions` into `sys.modules`, which is only
+meaningful in an interpreter where no betting test ran first; and each
+DB-backed file points `NOLA_DB_PATH` at its own temporary database before
+importing `core.db`, which resolves that path once, at import.
+
+`pytest` imports them all into one process and hits both at once — an
+INTERNALERROR from the first, foreign-key errors from the second. Neither is
+a bug in the tests. `run_tests.py` gives each file its own interpreter.
 
 ## Boot diagnostics
 

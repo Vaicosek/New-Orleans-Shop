@@ -8,6 +8,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+# Before ANY core.* import: core.db resolves NOLA_DB_PATH at import time.
+from core.env import load_env_file  # noqa: E402
+
+load_env_file()
+
 from bot.main import main  # noqa: E402
 
 if __name__ == "__main__":
