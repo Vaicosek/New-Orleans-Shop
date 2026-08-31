@@ -13,16 +13,29 @@ clickable.
 from __future__ import annotations
 
 CSS = r"""
+/* Palette drawn from the flag of New Orleans: blue #111B4C, gold #EDB41D,
+   red #D52C11, white. Each one is pulled toward the page rather than used
+   raw -- a flag is printed on cloth at arm's length, a price sheet is read
+   at 60cm, and the saturation that reads as civic on a pole reads as a glow
+   on a screen.
+
+   --ground is the flag's blue taken well below it: dark enough to be a
+   ground rather than a blue panel, blue enough that the gold on top of it is
+   the flag's pairing and not a generic dark theme. --accent is the
+   fleur-de-lis gold, desaturated so it does not bloom on dark. --loss is the
+   flag's red at the same treatment. --gain has no flag equivalent and stays
+   green, because up and down must be tellable apart at a glance and that is
+   a function, not a brand decision. */
 :root{
-  --ground: #1b1d20;
-  --raised: rgba(239,236,229,.05);
-  --line:   #3b3e43;
-  --text:   #efece5;
-  --dim:    #aaa59b;
-  --inert:  #6f6c66;
-  --gain:   #8fbf6a;
-  --loss:   #d87a6a;
-  --accent: #c9b37a;
+  --ground: #0f1328;
+  --raised: rgba(240,238,232,.055);
+  --line:   #2b3050;
+  --text:   #f0eee8;
+  --dim:    #a3a6bd;
+  --inert:  #6e7189;
+  --gain:   #7fb56a;
+  --loss:   #d0503a;
+  --accent: #d9b544;
 }
 *{box-sizing:border-box;margin:0;padding:0}
 html{color-scheme:dark;background:var(--ground)}
