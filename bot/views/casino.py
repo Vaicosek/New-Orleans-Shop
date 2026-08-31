@@ -209,6 +209,14 @@ class _BetModal(discord.ui.Modal):
         except games.GameError as err:
             await interaction.followup.send(f"Could not place that bet: {err}", ephemeral=True)
             return
+        except games.SeedSecretError:
+            # Deliberately NOT caught as a refusal (see core.games.SeedSecretError's
+            # own docstring): a missing/placeholder/short seed secret means the whole
+            # casino's fairness is compromised, not that this one bet failed. It must
+            # reach the process boundary and crash the process loudly rather than be
+            # shown to the player as a routine "your bet didn't go through" -- that
+            # silently hid the exact condition this exception exists to surface.
+            raise
         except Exception as err:  # noqa: BLE001 -- money errors surface as plain refusals
             await interaction.followup.send(f"Could not place that bet: {err}", ephemeral=True)
             return
@@ -247,6 +255,11 @@ class CasinoPanelView(discord.ui.View):
                 # the hash THIS bet actually settles against, never stale.
                 try:
                     published = games.commit(money.user(self.owner_id))
+                except games.SeedSecretError:
+                    # Same reasoning as _BetModal.on_submit: this is a deployment
+                    # defect, not a normal per-round refusal, and must crash loudly
+                    # rather than be shown to the player as "try again".
+                    raise
                 except Exception as err:  # noqa: BLE001 -- refuse the round, don't half-open it
                     await inter2.response.send_message(
                         f"Could not open a round right now: {err}", ephemeral=True
@@ -276,10 +289,24 @@ class CasinoPanelView(discord.ui.View):
     async def history(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
         await interaction.response.defer(ephemeral=True)
         bets = queries.list_user_bets(money.user(self.owner_id))
+
+        def _outcome_text(b: dict) -> str:
+            # Three real outcomes, not two: a voided round (core.games._void_round)
+            # refunds the stake in full and stores that refund in payout_coins too
+            # -- so `payout_coins` truthy does not mean "won". Every win pays out
+            # strictly more than the stake (every GAME_CONFIG payout_bps exceeds
+            # 10,000), so the stake itself is the dividing line: 0 is a loss, exactly
+            # the stake back is a void/refund, anything above the stake is a win.
+            payout = b["payout_coins"]
+            if payout <= 0:
+                return "lost"
+            if payout <= b["amount"]:
+                return "voided, refunded"
+            return "won " + money_text(payout)
+
         lines = [
             f"{b['game']}  {SEP} {b['selection']}  {SEP} staked "
-            f"{money_text(b['amount'])}  {SEP} "
-            f"{'won ' + money_text(b['payout_coins']) if b['payout_coins'] else 'lost'}"
+            f"{money_text(b['amount'])}  {SEP} {_outcome_text(b)}"
             for b in bets if b["settled_event"] is not None
         ]
         await interaction.followup.send(
