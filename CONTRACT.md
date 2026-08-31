@@ -14,7 +14,7 @@ if something must contradict it, this file changes first.
 | Economy | Fully separate DB, wallet, currency | No path from a NOLA bug to live Abex money |
 | Wagering | Discord only. **Never on the website.** | John: "its only for discord inside that discord its not on website i own" |
 | Money type | `INTEGER` everywhere. No floats. | AbexTech has float/int money coexisting across modules — a live inconsistency |
-| Command surface | Panels. One slash command per domain. | 136 -> 15 was the whole fight last time |
+| Command surface | Panels. One slash command per domain, plus `/setup` at install (S7). | 136 -> 15 was the whole fight last time |
 | Typed IDs | Never. Pickers, autocomplete, `/go <code>` addresses. | A modal asking for an ID is a design failure |
 | Hosting | Wispbyte panel, no shell | Everything operable by pinging the bot or clicking UI |
 
@@ -186,7 +186,21 @@ One slash command per domain. Everything else is a panel.
 | `/casino` | Casino panel | game picker, bet, round history, fairness verify |
 | `/predict` | Predictions panel | open markets, stake, my positions |
 | `/admin` | Admin panel | items, prices, thresholds, resolve markets, treasury |
+| `/setup` | Setup preview | builds the server's channels and roles, once, at install |
 | `/go <code>` | direct jump | 4-char address to any entity |
+
+`/setup` is the one command that is not a domain panel, and it is separate rather than a
+button inside `/admin` for a functional reason, not a cosmetic one: `/admin` is gated on
+`is_staff`, which reads `STAFF_ROLE_IDS` -- and on a fresh server that list is empty, so
+`is_staff` is False for **everyone**, the server's owner included. `/admin` is therefore
+unusable until setup has run, and a setup button living inside it could never be pressed.
+It is gated on `OWNER_DISCORD_IDS` **or** the guild's actual owner, for the same
+chicken-and-egg reason: that list may not be filled in yet either.
+
+It is idempotent and previews before it acts. Running it twice creates nothing the second
+time; a channel someone already made by hand with a matching name is **adopted**, not
+duplicated, because Discord allows two `#shop` channels and the pair is indistinguishable
+in a picker afterwards.
 
 Rules the panels must obey:
 
@@ -325,6 +339,12 @@ exponential backoff, gives up on a child after N rapid failures instead of resta
 forwards SIGTERM so a panel Stop closes the gateway cleanly. Boot runs a read-only self-check
 that resolves every configured guild/channel id and prints one readable block — the only
 diagnostic available without a shell.
+
+The three channel ids are **not** required env vars. A fresh server has no channels to
+name, and a panel-only host has no shell to add them afterwards, so `/setup` provisions
+the layout and `guild_layout` holds the ids; the env vars remain as an override and win
+over the table when set. `DISCORD_TOKEN`, `GUILD_ID`, `NOLA_GAME_SEED_SECRET` and
+`OWNER_DISCORD_IDS` are still required before first boot.
 
 `.env` keys are documented in `docs/deploy.md` by NAME only. No token, webhook, secret or
 access-granting id is ever written into this repo or the brain.

@@ -78,6 +78,22 @@ nobody remembered was there — and the loader prints the name of anything it
 skipped for that reason, because "I set it in the file and nothing changed"
 is otherwise an unfindable half-hour.
 
+### The channels are built, not configured
+
+`/setup`, run once in the server by its owner, creates the categories, channels and
+roles and records their ids in `guild_layout`. Nothing needs pasting into `.env`.
+
+It previews first — how many will be created, adopted and skipped — and it is safe to
+run twice: a second run creates nothing, and a channel someone already made by hand
+with a matching name is **adopted** rather than duplicated. Discord will happily hold
+two `#shop` channels and they are indistinguishable in a picker afterwards.
+
+It is its own command rather than a button in `/admin` because `/admin` is gated on
+`is_staff`, and on a fresh server `STAFF_ROLE_IDS` is empty — so `is_staff` is False for
+everyone including the owner, and a setup button inside it could never be pressed. The
+bot needs **Manage Channels** and **Manage Roles**; `/setup` names them up front rather
+than discovering the gap halfway through and leaving the server half-built.
+
 Required before the first boot:
 
 | Name | Missing means |

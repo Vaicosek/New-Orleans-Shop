@@ -195,8 +195,17 @@ def install() -> None:
             return func
         return deco
 
+    def guild_only(*_a, **_kw):
+        """Pass-through. The real decorator makes Discord refuse the command
+        in DMs; there is nothing to simulate here, but a cog using it must
+        still import, and a missing name reads as a broken module."""
+        def deco(func):
+            return func
+        return deco
+
     app_commands.command = command
     app_commands.describe = describe
+    app_commands.guild_only = guild_only
     app_commands.AppCommand = _AppCommand
     discord.app_commands = app_commands
 

@@ -9,6 +9,7 @@ from discord.ext import commands, tasks
 
 from core import alerts
 
+from .. import layout
 from ..permissions import is_staff
 from ..views.admin import AdminPanelView, build_admin_embed
 from ..views.alerts import AlertAckView, build_alert_embed
@@ -39,7 +40,11 @@ class AdminCog(commands.Cog):
         config = getattr(self.bot, "nola_config", None)
         if config is None:
             return
-        channel = self.bot.get_channel(config.alerts_channel_id)
+        # Through the layout, so this keeps working on a server that was set
+        # up by /setup and never had an ALERTS_CHANNEL_ID. None is normal
+        # before setup has run -- returning quietly is right, because raising
+        # inside a task loop sends the traceback somewhere nobody reads.
+        channel = layout.channel(self.bot, config, "channel:alerts")
         if channel is None:
             return
         for due_row in alerts.due():

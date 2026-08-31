@@ -67,9 +67,15 @@ def env_ids(name: str, default: tuple[int, ...] = ()) -> tuple[int, ...]:
 class BotConfig:
     token: str
     guild_id: int
-    shop_channel_id: int
-    orders_channel_id: int
-    alerts_channel_id: int
+    # Optional since /setup exists. A fresh server has no channels to name
+    # here, and a panel-only host has no shell to add them from later -- so
+    # the bot provisions its own layout and `core.provision` holds the ids.
+    # These stay as an override for a server that was wired by hand before
+    # /setup existed; env wins over the table when both are present, matching
+    # how core.env treats the real environment.
+    shop_channel_id: int | None
+    orders_channel_id: int | None
+    alerts_channel_id: int | None
     staff_role_ids: tuple[int, ...]
     manager_role_ids: tuple[int, ...]
     # Discord USER ids, not roles. Minting creates money out of nothing,
@@ -78,23 +84,26 @@ class BotConfig:
     command_sync_guild_only: bool
 
     def guild_channel_ids(self) -> dict[str, int]:
-        """Every configured channel id the boot self-check must resolve.
-        This dict IS the self-check's worklist -- add a channel here and it
-        is verified at every boot with no other code change needed."""
-        return {
+        """Every channel id set in the ENVIRONMENT that the boot self-check
+        must resolve. Unset ones are omitted rather than reported as broken:
+        after `/setup` the ids live in `guild_layout`, and an empty env is the
+        normal, healthy state. The self-check reports the provisioned layout
+        separately."""
+        candidates = {
             "SHOP_CHANNEL_ID": self.shop_channel_id,
             "ORDERS_CHANNEL_ID": self.orders_channel_id,
             "ALERTS_CHANNEL_ID": self.alerts_channel_id,
         }
+        return {name: cid for name, cid in candidates.items() if cid}
 
 
 def load_bot_config() -> BotConfig:
     return BotConfig(
         token=env_str("DISCORD_TOKEN", required=True),
         guild_id=env_int("GUILD_ID", required=True),
-        shop_channel_id=env_int("SHOP_CHANNEL_ID", required=True),
-        orders_channel_id=env_int("ORDERS_CHANNEL_ID", required=True),
-        alerts_channel_id=env_int("ALERTS_CHANNEL_ID", required=True),
+        shop_channel_id=env_int("SHOP_CHANNEL_ID"),
+        orders_channel_id=env_int("ORDERS_CHANNEL_ID"),
+        alerts_channel_id=env_int("ALERTS_CHANNEL_ID"),
         staff_role_ids=env_ids("STAFF_ROLE_IDS"),
         manager_role_ids=env_ids("MANAGER_ROLE_IDS"),
         owner_discord_ids=env_ids("OWNER_DISCORD_IDS"),

@@ -320,6 +320,25 @@ CREATE TABLE IF NOT EXISTS config (
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- What `/setup` built, so it never builds it twice. `key` is OUR name for a
+-- thing ('channel:shop', 'role:staff'); discord_id is what Discord called it.
+--
+-- This table is why the three channel ids are no longer required env vars: a
+-- fresh server has no channels to put in a .env, and a panel-only host has no
+-- shell to add them from afterwards. The bot provisions its own layout and
+-- remembers what it made.
+--
+-- `name` is the name at creation time, kept only for diagnostics -- people
+-- rename channels and that must not orphan anything. The id is the identity.
+CREATE TABLE IF NOT EXISTS guild_layout (
+    guild_id   INTEGER NOT NULL,
+    key        TEXT NOT NULL,
+    discord_id INTEGER NOT NULL,
+    name       TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (guild_id, key)
+);
+
 CREATE TABLE IF NOT EXISTS web_sessions (
     token      TEXT PRIMARY KEY,
     subject    TEXT NOT NULL REFERENCES wallets(subject) ON DELETE CASCADE,

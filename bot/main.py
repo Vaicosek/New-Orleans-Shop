@@ -27,12 +27,15 @@ from core import db, games, money, pricing
 from core.config import BotConfig, ConfigError, load_bot_config
 
 from .views.alerts import AlertAckView
+from core import provision
+
 from .views.casino import RoundVerifyView
 from .views.orders import OrderCardView
 
 log = logging.getLogger("nola.bot")
 
 COGS = (
+    "bot.cogs.setup",
     "bot.cogs.shop",
     "bot.cogs.orders",
     "bot.cogs.wallet",
@@ -95,6 +98,25 @@ class NolaBot(commands.Bot):
                 guild = None
         if guild is not None:
             lines.append(f"GUILD_ID {config.guild_id}: OK -- {guild.name!r}")
+
+        # The provisioned layout. On a server where /setup has not run this is
+        # the single most useful line in the block -- without it an operator
+        # sees a clean-looking check and no explanation for why nothing works.
+        if guild is not None:
+            live = [c.id for c in guild.channels] + [r.id for r in guild.roles]
+            known = provision.stored(guild.id)
+            resolved = sum(1 for d in provision.DESIRED
+                           if int(known.get(d.key, 0)) in set(live))
+            total = len(provision.DESIRED)
+            if resolved == total:
+                lines.append(f"layout: OK -- {total}/{total} channels and roles provisioned")
+            elif resolved == 0:
+                lines.append(f"layout: NOT SET UP -- run /setup in {guild.name!r} to build it")
+            else:
+                lines.append(f"layout: INCOMPLETE -- {resolved}/{total} resolve; "
+                             f"run /setup to rebuild the rest")
+        else:
+            lines.append("layout: SKIPPED -- guild not resolved")
 
         for env_name, channel_id in config.guild_channel_ids().items():
             channel = self.get_channel(channel_id)

@@ -78,7 +78,7 @@ for _finder, name, _ispkg in pkgutil.walk_packages(bot.__path__, prefix="bot."):
 check(f"every module under bot/ imports cleanly ({len(modules)} modules)",
       not import_errors, "; ".join(import_errors))
 
-# ------------------------------------------------------------------ exactly 7 slash commands
+# ------------------------------------------------------------------ exactly 8 slash commands
 from discord import app_commands  # noqa: E402
 
 cog_modules = [m for m in modules if re.fullmatch(r"bot\.cogs\.[a-z_]+", m.__name__)]
@@ -93,11 +93,17 @@ for mod in cog_modules:
                 commands_found.append((mod.__name__, member_name, member))
 
 command_names = sorted(f"{m}.{n} (/{c.name})" for m, n, c in commands_found)
+# Seven domain panels plus /setup, which is not a domain -- it runs once at
+# install and exists separately because /admin is gated on is_staff, which is
+# False for everyone on a server whose STAFF_ROLE_IDS is still empty. The
+# number is pinned rather than bounded: this budget is the whole reason the
+# surface stayed small, and a command added without touching CONTRACT.md
+# section 7 should fail here first.
 check(
-    f"exactly 7 top-level slash commands exist (found {len(commands_found)}: {command_names})",
-    len(commands_found) == 7,
+    f"exactly 8 top-level slash commands exist (found {len(commands_found)}: {command_names})",
+    len(commands_found) == 8,
 )
-check("all 7 command names are distinct",
+check("all 8 command names are distinct",
       len({c.name for _m, _n, c in commands_found}) == len(commands_found))
 
 
