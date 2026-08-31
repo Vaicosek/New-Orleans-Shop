@@ -303,7 +303,8 @@ Three audiences, one shell.
 | Route | Who | Notes |
 |---|---|---|
 | `/` | public | storefront: what New Orleans stocks, what it costs |
-| `/stock` | public | live table, both price bases |
+| `/inventory` | public | live table, both price bases |
+| `/stock` | public | the same page under the name it had before the owner renamed it. Same handler, not a redirect — a URL somebody has already pasted into Discord is a promise, and a rename is not a reason to break one |
 | `/me` | customer | Discord OAuth2. Own orders, balance, history |
 | `/ledger` | staff | internal: balances, orders, payouts, audit trail |
 | `/health` | public | must answer when the bot is down |

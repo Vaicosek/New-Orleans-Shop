@@ -35,11 +35,22 @@ CSS = r"""
   --ground: #0f1328;
   --raised: rgba(240,238,232,.055);
   --line:   #2b3050;
+  /* Three steps of ink and no more, each one measured against the TILE'S
+     lightest pixel rather than against the flat ground -- the texture costs
+     about a point of contrast and a colour checked against the wrong
+     background is not checked. On #161c38: text 14.4:1, dim 10.9:1,
+     inert 7.5:1, so every step clears the 7:1 body floor.
+
+     --loss is the exception and it is a deliberate one: 7.05:1 on the tile,
+     just under. Red cannot be both red and that bright on this navy -- the
+     versions that clear 7:1 read as salmon, and a "Cancelled" that does not
+     look red has stopped doing its job. It is used only on short status
+     words and negative amounts, never on prose. */
   --text:   #f0eee8;
-  --dim:    #a3a6bd;
-  --inert:  #6e7189;
-  --gain:   #7fb56a;
-  --loss:   #d0503a;
+  --dim:    #cdd0de;
+  --inert:  #a8adc2;
+  --gain:   #9ccd88;
+  --loss:   #ec9080;
   --accent: #d9b544;
 
   /* The flag's band, at flag saturation. It is drawn 1px tall -- at that

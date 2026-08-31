@@ -42,7 +42,7 @@ BAND = '<div class="band"><i></i><i></i><i></i></div>'
 
 NAV: list[tuple[str, str, str]] = [
     ("Storefront", "/", "storefront"),
-    ("Stock", "/stock", "stock"),
+    ("Inventory", "/inventory", "stock"),
     ("Hub", "/me", "account"),
 ]
 STAFF_NAV: tuple[str, str, str] = ("Ledger", "/ledger", "ledger")

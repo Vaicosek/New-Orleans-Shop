@@ -1,4 +1,4 @@
-"""`/` and `/stock` -- public. No session, no dependency on the bot process.
+"""`/` and `/inventory` -- public. No session, no dependency on the bot process.
 
 Both routes read only the local database through `core.catalog`, so they
 answer identically whether or not the Discord bot is currently running.
@@ -60,14 +60,14 @@ async def storefront(request: web.Request) -> web.Response:
 
     body = f"""
 <h1>New Orleans</h1>
-<p>Goods on offer today. See <a href="/stock">stock</a> for quantity on hand.</p>
+<p>Goods on offer today. See <a href="/inventory">inventory</a> for quantity on hand.</p>
 <h2>Price sheet</h2>
 {table}
 """
     return page("Storefront", "storefront", body, identity=identity)
 
 
-async def stock(request: web.Request) -> web.Response:
+async def inventory(request: web.Request) -> web.Response:
     identity = await resolve_identity(request)
     items = list_items(active_only=True)
 
@@ -102,13 +102,19 @@ async def stock(request: web.Request) -> web.Response:
         table = '<p class="empty">Nothing stocked yet.</p>'
 
     body = f"""
-<h1>Stock</h1>
+<h1>Inventory</h1>
 <p>Live quantity on hand, both price bases.</p>
 {table}
 """
-    return page("Stock", "stock", body, identity=identity)
+    return page("Inventory", "stock", body, identity=identity)
 
 
 def register(app: web.Application) -> None:
     app.router.add_get("/", storefront)
-    app.router.add_get("/stock", stock)
+    app.router.add_get("/inventory", inventory)
+    # /stock is what this page was called until the owner renamed it. It stays
+    # registered because a URL somebody has already opened, bookmarked or
+    # pasted into Discord is a promise, and a rename is not a reason to break
+    # one. Same handler, not a redirect: a redirect would be one more thing
+    # that can fail on a host with no shell.
+    app.router.add_get("/stock", inventory)

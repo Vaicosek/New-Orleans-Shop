@@ -78,7 +78,9 @@ BANNED_CORE_MODULES = ("core.games", "core.predictions")
 # CONTRACT.md S10 -- the entire, exact route surface this website may serve.
 ALLOWED_ROUTES = {
     "/health", "/login", "/auth/callback", "/logout",
-    "/", "/stock", "/me", "/ledger",
+    # /inventory is the page's name; /stock is the name it had before the
+    # owner renamed it and stays served so an already-pasted link keeps working.
+    "/", "/inventory", "/stock", "/me", "/ledger",
 }
 
 
