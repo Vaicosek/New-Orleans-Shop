@@ -77,6 +77,25 @@ tbody tr:hover td{background:var(--raised)}
 
 .empty{color:var(--inert);padding:8px 0}
 
+/* The wallet strip. Sits above the masthead on every signed-in page, because
+   "what have I got" is the question a shop's site is asked most often and it
+   should never cost a click. Muted labels, real figures, no card. */
+.wallet{display:flex;gap:30px;align-items:baseline;flex-wrap:wrap;
+  padding:10px 48px;border-bottom:1px solid var(--line);
+  font-size:15px;color:var(--dim)}
+.wallet b{font-weight:400;color:var(--text)}
+
+/* Balances as a definition list with a ruled total -- a bank statement's
+   shape. Explicitly not stat cards: four tinted boxes across the top is the
+   single most AI-looking thing this page could do. */
+.sums{max-width:560px;margin-top:4px}
+.sums .row{display:flex;justify-content:space-between;gap:24px;
+  padding:9px 0;border-bottom:1px solid var(--line)}
+.sums .row span:first-child{color:var(--dim)}
+.sums .row.total{border-bottom:none;border-top:2px solid var(--line);
+  margin-top:2px;padding-top:11px}
+.sums .row.total span:first-child{color:var(--text)}
+
 .foot{padding:24px 48px;border-top:1px solid var(--line);color:var(--inert);font-size:14px}
 
 @media(max-width:720px){

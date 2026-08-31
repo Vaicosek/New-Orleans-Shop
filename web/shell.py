@@ -12,13 +12,16 @@ from typing import Optional
 
 from aiohttp import web
 
+from core.money import balance
+from core.pricing import money_text
+
 from .theme import CSS
 from .auth import Identity
 
 NAV: list[tuple[str, str, str]] = [
     ("Storefront", "/", "storefront"),
     ("Stock", "/stock", "stock"),
-    ("Account", "/me", "account"),
+    ("Hub", "/me", "account"),
 ]
 STAFF_NAV: tuple[str, str, str] = ("Ledger", "/ledger", "ledger")
 
@@ -49,6 +52,26 @@ def _who_html(identity: Optional[Identity]) -> str:
             f'<a class="navlink" href="{logout_href}">Sign out</a>')
 
 
+def _wallet_html(identity: Optional[Identity]) -> str:
+    """The signed-in visitor's money, above everything else.
+
+    Anonymous visitors get nothing here -- an empty strip reading "0 g" would
+    be decorating an absence, and it would also be a lie. A balance lookup
+    that fails renders nothing rather than a zero: "we could not read it" and
+    "you have none" are different facts and must never look the same.
+    """
+    if identity is None:
+        return ""
+    try:
+        bal = balance(identity.subject)
+    except Exception:  # noqa: BLE001 -- the page still renders without it
+        return ""
+    return (f'<div class="wallet">'
+            f'<span>Wallet available <b>{money_text(bal.available)}</b></span>'
+            f'<span>Held <b>{money_text(bal.held)}</b></span>'
+            f'</div>')
+
+
 def page(title: str, nav_key: str, body: str, *,
          identity: Optional[Identity] = None, status: int = 200) -> web.Response:
     """Render `body` inside the shared chrome. Returns a `web.Response`.
@@ -67,6 +90,7 @@ def page(title: str, nav_key: str, body: str, *,
 <style>{CSS}</style>
 </head>
 <body>
+{_wallet_html(identity)}
 <header class="masthead">
   <a class="brand" href="/"><span class="wordmark">New Orleans</span></a>
   <nav class="nav">{_nav_html(nav_key, identity)}</nav>

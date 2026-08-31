@@ -186,10 +186,19 @@ async def main() -> None:
         me_text = await r.text()
 
         mt = pricing.money_text
-        check("/me balance line is money_text throughout, symbol after each number",
-              f"<p>{mt(bal.coins)} &middot; {mt(bal.held)} held &middot; "
-              f"{mt(bal.available)} available</p>" in me_text,
-              me_text[me_text.find("<h2>Balance</h2>"):][:200])
+        # The balance moved from a prose line to a ruled definition list (the
+        # accepted hub shape). The assertion follows the INTENT, not the old
+        # markup: all three figures present, each through money_text so the
+        # symbol lands after the number, and a ruled total rather than cards.
+        check("/me shows every balance figure through money_text",
+              all(f"<span>{mt(v)}</span>" in me_text
+                  for v in (bal.available, bal.held, bal.coins)),
+              me_text[me_text.find("Your money"):][:300])
+        # Not `"stat" not in me_text` -- that matched the orders table's own
+        # Status column. A substring check is only as good as the substring.
+        check("/me balances are a ruled list with a total, not stat cards",
+              'class="sums"' in me_text and 'class="row total"' in me_text,
+              "expected the definition-list shape from the accepted brief")
         check("/me never prints the retired currency word",
               not RETIRED.search(me_text),
               str(RETIRED.findall(me_text)[:5]))
