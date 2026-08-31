@@ -650,6 +650,54 @@ class AdminPanelView(_StaffGatedView):
         await interaction.response.defer(ephemeral=True)
         await interaction.followup.send(embed=build_treasury_embed(), ephemeral=True)
 
+    @discord.ui.button(label="Freeze / unfreeze wallet", style=discord.ButtonStyle.secondary, row=2)
+    async def freeze_wallet(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        # Reversible toggle -- same pattern as Retire/restore: a picker,
+        # then the staff gate already re-checked on every click by
+        # _StaffGatedView.interaction_check IS the confirmation. A frozen
+        # wallet refuses every hold and transfer outright (core.money's
+        # place_hold/transfer), so this is the one button that can stop
+        # someone's money moving at all.
+        async def picked(inter: discord.Interaction, member: discord.abc.User) -> None:
+            await inter.response.defer(ephemeral=True)
+            subject = money.user(member.id)
+            actor = money.user(interaction.user.id)
+            bal = money.balance(subject)
+            if bal.frozen:
+                money.unfreeze(subject, service="owner", actor=actor)
+                await inter.followup.send(f"{member.display_name}'s wallet unfrozen.", ephemeral=True)
+            else:
+                money.freeze(subject, service="owner", actor=actor)
+                await inter.followup.send(f"{member.display_name}'s wallet frozen.", ephemeral=True)
+
+        await interaction.response.send_message(
+            "Pick a member to freeze or unfreeze:",
+            view=pickers.UserPickerView(self.owner_id, picked),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Block / allow gambling", style=discord.ButtonStyle.secondary, row=2)
+    async def gambling_flag(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        # `games` has no FLAG scope (see core.money.SERVICE_SCOPES), so the
+        # service this restriction governs can never lift it -- only this
+        # owner-scoped staff action can.
+        async def picked(inter: discord.Interaction, member: discord.abc.User) -> None:
+            await inter.response.defer(ephemeral=True)
+            subject = money.user(member.id)
+            actor = money.user(interaction.user.id)
+            if "gambling_blocked" in money.flags(subject):
+                money.clear_flag(subject, "gambling_blocked", service="owner")
+                await inter.followup.send(f"{member.display_name} can gamble again.", ephemeral=True)
+            else:
+                money.set_flag(subject, "gambling_blocked", service="owner", set_by=actor)
+                await inter.followup.send(f"{member.display_name} is blocked from gambling.", ephemeral=True)
+
+        await interaction.response.send_message(
+            "Pick a member to block or allow gambling for:",
+            view=pickers.UserPickerView(self.owner_id, picked),
+            ephemeral=True,
+        )
+
     @discord.ui.button(label="Fund treasury", style=discord.ButtonStyle.primary, row=2)
     async def fund(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
         """Owner-only. Without this nothing can put gold into the system and
