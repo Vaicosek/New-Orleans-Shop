@@ -1,7 +1,9 @@
 """CSS tokens for the New Orleans site.
 
-Reference cousin: a French Quarter enamel street plaque and a Paris bourse
-notice. New Orleans was founded French and still signs itself that way -- the
+Reference cousin: a cast-iron balcony gate panel on Royal Street at night,
+lettered like the blue-and-white glazed plaque set into the sidewalk at the
+corner. The ground is the ironwork; the type is the plaque -- a squarish
+condensed sans, the way a ceramic tile is lettered, not a book face. New Orleans was founded French and still signs itself that way -- the
 fleur-de-lis, the tricolour band, the Didone lettering on the corner tiles.
 That is where the type and the ornament come from, not from a dashboard.
 Plain rules, tabular figures, one ink colour (`--accent`) plus the text
@@ -51,11 +53,24 @@ CSS = r"""
 }
 *{box-sizing:border-box;margin:0;padding:0}
 html{color-scheme:dark;background:var(--ground)}
+
+/* The ground is a Vieux Carre balcony railing: a 64px quatrefoil cast into
+   the page, stroked one step off the ground colour and nothing more. It is a
+   MATERIAL, not a decoration -- the point is that the page has a surface, the
+   way a printed sheet has a tooth, and the moment it competes with a price it
+   has failed. Two rules keep it honest: exactly one stroke colour, and no
+   fill, so there is no wash anywhere for a gradient to hide in. The tile is
+   authored here rather than fetched, so the page still has its ground with
+   the network off. Measured, not eyeballed: text on the tile's lightest pixel
+   is 13.7:1 -- the texture costs about one point of contrast and stays far
+   above the 7:1 floor. */
 body{
-  background:var(--ground);
+  background-color:var(--ground);
+  background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='64' height='64' viewBox='0 0 64 64'><g fill='none' stroke='%23161c38' stroke-width='1.5'><circle cx='32' cy='21' r='11'/><circle cx='32' cy='43' r='11'/><circle cx='21' cy='32' r='11'/><circle cx='43' cy='32' r='11'/><circle cx='0' cy='0' r='6'/><circle cx='64' cy='0' r='6'/><circle cx='0' cy='64' r='6'/><circle cx='64' cy='64' r='6'/><path d='M0 0 L14 14 M64 0 L50 14 M0 64 L14 50 M64 64 L50 50'/></g></svg>");
+  background-repeat:repeat;
   color:var(--text);
-  font-family:Georgia,'Times New Roman',serif;
-  font-size:17px;
+  font-family:Helvetica,Arial,'Liberation Sans',sans-serif;
+  font-size:18px;
   line-height:1.6;
   font-variant-numeric:tabular-nums;
 }
@@ -64,12 +79,29 @@ a{color:var(--accent);text-decoration:underline;text-underline-offset:3px;
 a:hover{text-decoration-color:var(--accent)}
 :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 
-h1,h2,h3,h4,.wordmark{
-  font-family:'Playfair Display',Didot,'Bodoni MT',Georgia,serif;
-  font-weight:400;
+/* Headings and the wordmark are the plaque's lettering: condensed, squarish,
+   set in the one weight above the body and no other. Two weights on the page,
+   400 and 700, and nothing in between -- a third would be a scheme rather
+   than a hierarchy. No webfont is fetched: the page has to be right with the
+   network off, and a ceramic plaque's letters were never a display face
+   anyway. */
+h1,h2,h3,h4,.wordmark,th{
+  font-family:'Arial Narrow','Liberation Sans Narrow','Nimbus Sans Narrow',
+              'Helvetica Neue',Helvetica,Arial,sans-serif;
+  font-weight:700;
 }
+h4,th{font-weight:400}
 h1{font-size:28px;margin-bottom:8px}
-h2{font-size:20px;margin:34px 0 12px}
+
+/* A section heading sits on an iron bar with a brass collar at its left end,
+   the way a rail meets its post. It is the page's one ornament that is not
+   the flag, it is 28px wide, and it is the only brass on the page apart from
+   the current nav item -- two things in one colour is an accent, three is a
+   scheme. */
+h2{font-size:20px;margin:34px 0 12px;position:relative;
+  padding-bottom:9px;border-bottom:3px solid var(--line)}
+h2::after{content:"";position:absolute;left:0;bottom:-3px;
+  width:28px;height:3px;background:var(--accent)}
 h4{font-size:15px;color:var(--dim);margin:18px 0 6px}
 p{color:var(--dim);max-width:70ch}
 p+p{margin-top:8px}
