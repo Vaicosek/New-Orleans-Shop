@@ -24,6 +24,8 @@ from core import provision
 from core.config import BotConfig
 from core.provision import Step
 
+from ..ui.embed import panel_embed
+
 ACTION_GLYPH = {"create": "+", "adopt": "~", "ok": "="}
 
 
@@ -67,13 +69,13 @@ def missing_permissions(guild: discord.Guild) -> list[str]:
 
 def build_setup_embed(steps: list[Step], guild: discord.Guild) -> discord.Embed:
     counts = provision.summarise(steps)
-    embed = discord.Embed(
-        title="Server setup",
-        description=(
+    embed = panel_embed(
+        "Server setup",
+        (
             f"**{counts['create']}** to create · **{counts['adopt']}** to adopt · "
             f"**{counts['ok']}** already in place"
         ),
-        colour=0xC9B37A,
+        tone="brand",
     )
     lines = []
     for s in steps:

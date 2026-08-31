@@ -495,6 +495,31 @@ def flags(subject: str, *, conn: Optional[sqlite3.Connection] = None) -> set[str
     return {r["flag"] for r in rows}
 
 
+# ------------------------------------------------------------------ freeze
+
+def freeze(subject: str, *, service: str, actor: str,
+           note: str | None = None,
+           conn: Optional[sqlite3.Connection] = None) -> None:
+    """Freeze a wallet: `place_hold` and `transfer` both refuse a frozen
+    wallet outright. Same authority as the flags above -- only `owner` may."""
+    _require_scope(service, FLAG)
+    if not actor or not actor.strip():
+        raise ValueError("freeze needs a non-empty actor")
+    with db_in(conn) as c:
+        ensure_wallet(subject, service=service, conn=c)
+        c.execute("UPDATE wallets SET frozen = 1 WHERE subject = ?", (subject,))
+
+
+def unfreeze(subject: str, *, service: str, actor: str,
+             conn: Optional[sqlite3.Connection] = None) -> None:
+    """Clear a wallet freeze. Same authority as `freeze`."""
+    _require_scope(service, FLAG)
+    if not actor or not actor.strip():
+        raise ValueError("unfreeze needs a non-empty actor")
+    with db_in(conn) as c:
+        c.execute("UPDATE wallets SET frozen = 0 WHERE subject = ?", (subject,))
+
+
 # ------------------------------------------------------------------ idempotency
 
 def fingerprint(payload: Any) -> str:

@@ -232,9 +232,9 @@ check("the claim itself landed",
 check(f"the public order card was edited after a panel claim "
       f"({len(card.edits)} edit(s))", len(card.edits) == 1)
 check("the refreshed card no longer reports the order as open",
-      "Status: claimed" in card.body(), card.body())
+      f"Status: {order_views.status_label('claimed')}" in card.body(), card.body())
 check("the refreshed card names the claim, so a second worker sees it is taken",
-      "u:9001" in card.body(), card.body())
+      order_views.worker_mention("u:9001") in card.body(), card.body())
 
 
 # ============================================= [1b] deliver from the panel
@@ -251,7 +251,7 @@ check("the delivery itself landed",
 check(f"the public order card was edited after a panel delivery "
       f"({len(card.edits)} edit(s))", len(card.edits) == 1)
 check("the refreshed card reports awaiting_verification",
-      "Status: awaiting_verification" in card.body(), card.body())
+      f"Status: {order_views.status_label('awaiting_verification')}" in card.body(), card.body())
 
 
 # ================================================ [2] approve from the panel
@@ -271,7 +271,7 @@ check("the approval itself landed and paid",
 check(f"the public order card was edited after a panel approval "
       f"({len(card.edits)} edit(s))", len(card.edits) == 1)
 check("the refreshed card reports fulfilled, not awaiting_verification",
-      "Status: fulfilled" in card.body(), card.body())
+      f"Status: {order_views.status_label('fulfilled')}" in card.body(), card.body())
 _view = card.edits[-1].get("view") if card.edits else None
 check("every button on the refreshed card of a closed order is disabled -- "
       "no live Approve on an already-paid order",

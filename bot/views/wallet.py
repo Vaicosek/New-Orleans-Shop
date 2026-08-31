@@ -19,6 +19,7 @@ import discord
 
 from core import money
 
+from .. import queries
 from .pickers import UserPickerView
 from ..ui.embed import SEP, money_text, panel_embed, rows
 
@@ -42,11 +43,51 @@ def _unix(ts: str) -> int:
     return int(dt.timestamp())
 
 
+def _describe_entry(e: dict) -> str:
+    """Turn a ledger_entries row into a human sentence from its STRUCTURED
+    fields (ref_kind / ref_id / service), never the free-text `reason`.
+
+    `reason` is meant for logs/audits and carries raw internal ids verbatim
+    (e.g. "coinflip win, round <round_id>", "market <market_id> resolved",
+    "order #<id> payout") -- see core/games.py, core/predictions.py and
+    core/orders.py for what actually gets passed as reason=. None of that
+    belongs in a player-facing panel. Only fall back to the raw reason when
+    ref_kind doesn't map to anything we're confident about.
+    """
+    ref_kind = e.get("ref_kind")
+    delta = e["delta"]
+    if ref_kind == "game_round":
+        return "Casino win" if delta > 0 else "Casino loss"
+    if ref_kind == "pred_market":
+        kind = "payout" if delta > 0 else "stake"
+        ref_id = e.get("ref_id")
+        question = None
+        if ref_id is not None:
+            try:
+                market = queries.get_market_detail(int(ref_id))
+            except (TypeError, ValueError):
+                market = None
+            if market is not None:
+                question = market.get("question")
+        if question:
+            return f"Prediction market {kind}: {question}"[:100]
+        return f"Prediction market {kind}"
+    if ref_kind == "order":
+        ref_id = e.get("ref_id")
+        return f"Order #{ref_id} payout" if ref_id else "Order payout"
+    if ref_kind == "treasury":
+        return "Treasury funding"
+    if ref_kind is None and e.get("service") == "owner":
+        return "Wallet transfer received" if delta > 0 else "Wallet transfer sent"
+    # Unrecognised shape -- fall back to the raw reason rather than guess.
+    return str(e["reason"])
+
+
 def build_history_embed(subject: str) -> discord.Embed:
     entries = money.history(subject, limit=15)
     lines = [
         f"<t:{_unix(e['ts'])}:f>  {'+' if e['delta'] > 0 else ''}{money_text(e['delta'])}  "
-        f"{SEP} {e['reason']}"
+        f"{SEP} {_describe_entry(e)}"
         for e in entries
     ]
     return panel_embed("Recent activity", rows(lines, empty_text="No activity yet."))

@@ -34,6 +34,35 @@ from ..ui.embed import SEP, money_text, panel_embed, rows
 
 _ADDRESS_MARK = re.compile(r"address (\S+)")
 
+# One status-to-plain-label mapping, routed through everywhere a status is
+# shown to a user -- the full set of values `core/orders.py` actually uses
+# (open -> claimed -> awaiting_verification -> fulfilled, or cancelled).
+STATUS_LABELS = {
+    "open": "Open",
+    "claimed": "Claimed",
+    "awaiting_verification": "Awaiting verification",
+    "fulfilled": "Fulfilled",
+    "cancelled": "Cancelled",
+}
+
+
+def status_label(status: str) -> str:
+    return STATUS_LABELS.get(status, status)
+
+
+def worker_mention(subject: str) -> str:
+    """Render a wallet subject ("u:<discord id>") as a `<@id>` mention for
+    display. The raw "u:<id>" form stays the subject used for every
+    money-layer call -- only what is PRINTED changes. Falls back to the raw
+    subject for anything that isn't a Discord-user subject (e.g. a service
+    account), same as `web/auth.py`'s reverse parse of this same prefix.
+    """
+    if isinstance(subject, str) and subject.startswith("u:"):
+        discord_id = subject.split(":", 1)[1]
+        if discord_id.isdigit():
+            return f"<@{discord_id}>"
+    return subject
+
 
 def _order_footer(order_id: int, code: str) -> str:
     # The code alone -- never the raw order id next to it. `parse_order_id`
@@ -68,7 +97,7 @@ def build_order_embed(order_id: int) -> discord.Embed:
     claims = orders_core.list_claims(order_id)
     label = price_label(order["price_coins"], order["price_unit_pieces"], order["stack_size"])
     claim_lines = [
-        f"{c['worker']} {SEP} claimed {c['pieces']}, delivered {c['delivered']}"
+        f"{worker_mention(c['worker'])} {SEP} claimed {c['pieces']}, delivered {c['delivered']}"
         + (f" (paid {money_text(c['paid_coins'])})" if c["paid_coins"] else "")
         for c in claims
     ]
@@ -76,7 +105,7 @@ def build_order_embed(order_id: int) -> discord.Embed:
         f"{order['item_name']}\n"
         f"{label}\n"
         f"Requested {order['requested_pieces']}  {SEP} produced {order['produced_pieces']}\n"
-        f"Status: {order['status']}\n\n"
+        f"Status: {status_label(order['status'])}\n\n"
         f"{rows(claim_lines, empty_text='No claims yet.')}"
     )
     code = addressing.mint("order", order_id)
@@ -273,7 +302,8 @@ class OrderCardView(discord.ui.View):
             return
         if order["status"] != "awaiting_verification":
             await interaction.followup.send(
-                f"Order #{order_id} is {order['status']}, not ready to approve.", ephemeral=True
+                f"Order #{order_id} is {status_label(order['status'])}, not ready to approve.",
+                ephemeral=True
             )
             return
         # Compute the exact payout BEFORE the gate is ever shown -- the
@@ -287,7 +317,7 @@ class OrderCardView(discord.ui.View):
             return
         label = price_label(order["price_coins"], order["price_unit_pieces"], order["stack_size"])
         breakdown = "\n".join(
-            f"  {SEP} {cl['worker']}: {cl['delivered_pieces']} piece(s) {SEP} {money_text(cl['amount'])}"
+            f"  {SEP} {worker_mention(cl['worker'])}: {cl['delivered_pieces']} piece(s) {SEP} {money_text(cl['amount'])}"
             for cl in preview["per_claim"]
         )
         await interaction.followup.send(
@@ -436,7 +466,7 @@ class OrdersPanelView(discord.ui.View):
                 return
             label = price_label(order["price_coins"], order["price_unit_pieces"], order["stack_size"])
             breakdown = "\n".join(
-                f"  {SEP} {cl['worker']}: {cl['delivered_pieces']} piece(s) {SEP} {money_text(cl['amount'])}"
+                f"  {SEP} {worker_mention(cl['worker'])}: {cl['delivered_pieces']} piece(s) {SEP} {money_text(cl['amount'])}"
                 for cl in preview["per_claim"]
             )
             await inter.response.send_message(
@@ -467,7 +497,7 @@ class OrdersPanelView(discord.ui.View):
             return
         stuck = queries.list_orders(("open", "claimed", "awaiting_verification"))
         options = [
-            (f"#{o['id']} {o['item_name']} {SEP} {o['status']} "
+            (f"#{o['id']} {o['item_name']} {SEP} {status_label(o['status'])} "
              f"{SEP} {o['produced_pieces']}/{o['requested_pieces']}", str(o["id"]))
             for o in stuck
         ]
@@ -484,7 +514,7 @@ class OrdersPanelView(discord.ui.View):
                 warn = ("\n\n**This order has a zero price snapshot.** Approving it raises "
                         "rather than paying zero, so it must be repriced or cancelled.")
             await inter.response.send_message(
-                f"Order #{order['id']} {SEP} {order['item_name']} {SEP} {order['status']}\n"
+                f"Order #{order['id']} {SEP} {order['item_name']} {SEP} {status_label(order['status'])}\n"
                 f"Delivered {order['produced_pieces']} of {order['requested_pieces']} pieces "
                 f"at {label}.{warn}",
                 view=_StuckOrderView(order["id"], self.owner_id, self.config),
@@ -621,7 +651,7 @@ def build_panel_embed() -> discord.Embed:
     open_orders = queries.list_orders(("open", "claimed", "awaiting_verification"), limit=15)
     lines = [
         f"#{o['id']}  {o['item_name']}  {SEP} {o['produced_pieces']}/{o['requested_pieces']}  "
-        f"({o['status']})"
+        f"({status_label(o['status'])})"
         for o in open_orders
     ]
     return panel_embed("Orders board", rows(lines, empty_text="No open orders."))

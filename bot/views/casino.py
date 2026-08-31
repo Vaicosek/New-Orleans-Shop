@@ -7,6 +7,7 @@ before a restart can still be checked afterwards.
 """
 from __future__ import annotations
 
+import json
 import re
 
 import discord
@@ -28,6 +29,14 @@ SELECTION_LABELS = {
 
 def _round_footer(round_id: str, code: str) -> str:
     return f"address {code}  {SEP} round:{round_id}"
+
+
+def _short_hex(value: str, *, head: int = 12, tail: int = 6) -> str:
+    """Shorten a long hex blob to a glance-form ("a1b2c3...9f8e"). Below the
+    head+tail length there is nothing to save by truncating."""
+    if not value or len(value) <= head + tail + 3:
+        return value
+    return f"{value[:head]}...{value[-tail:]}"
 
 
 def parse_round_id(message: discord.Message | None) -> str | None:
@@ -98,11 +107,17 @@ def build_verify_embed(round_id: str) -> discord.Embed:
     # The pre-bet commitment hash -- from the COMMITMENT row, never the
     # round's own copy -- is the value a player who saved the commitment
     # message should be comparing against.
-    committed_hash = v["commitment_server_seed_hash"] or "(no commitment on record)"
+    committed_hash = v["commitment_server_seed_hash"]
+    server_seed = v["server_seed"]
+    if committed_hash:
+        hash_line = (f"committed server_seed_hash: {_short_hex(committed_hash)}"
+                     f"  (full: {committed_hash})")
+    else:
+        hash_line = "committed server_seed_hash: (no commitment on record)"
     lines += [
         "",
-        f"server_seed: {v['server_seed']}",
-        f"committed server_seed_hash: {committed_hash}",
+        f"server_seed: {_short_hex(server_seed)}  (full: {server_seed})",
+        hash_line,
         f"client_seed: {v['client_seed']}",
         f"nonce: {v['nonce']}",
     ]
@@ -140,7 +155,7 @@ class _BetModal(discord.ui.Modal):
     """
 
     def __init__(self, game: str, selection: str, subject: str,
-                 commitment_id: str | None = None):
+                 commitment_id: str | None = None, server_seed_hash: str | None = None):
         super().__init__(title=f"Bet: {GAME_LABELS.get(game, game)}"[:45], timeout=300)
         self.game, self.selection, self.subject = game, selection, subject
         self.commitment_id = commitment_id
@@ -155,6 +170,20 @@ class _BetModal(discord.ui.Modal):
         )
         self.add_item(self.amount)
         self.add_item(self.client_seed)
+        # This bet's own fresh commitment hash, shown here because a Modal
+        # cannot show free text and this interaction's single response is
+        # `send_modal` -- there is nowhere else to put it that is still
+        # current for THIS bet (see defects 8/14). Not required, and the
+        # player is told not to edit it: it is display-only, carried on the
+        # TextInput's default so it is still visible and copyable.
+        if server_seed_hash:
+            self.commitment_hash = discord.ui.TextInput(
+                label="Committed hash (yours to verify, don't edit)",
+                default=_short_hex(server_seed_hash),
+                required=False,
+                max_length=100,
+            )
+            self.add_item(self.commitment_hash)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
@@ -206,29 +235,33 @@ class CasinoPanelView(discord.ui.View):
         async def game_picked(inter: discord.Interaction, game: str) -> None:
             selection_options = SELECTION_LABELS[game]
 
-            # Publish the commitment BEFORE the stake is known. `commit()`
-            # writes its own transaction, so the hash below is durable and
-            # auditable the moment the player reads it -- which is the whole
-            # point: a hash shown after the bet proves nothing.
-            try:
-                published = games.commit(money.user(self.owner_id))
-            except Exception as err:  # noqa: BLE001 -- refuse the round, don't half-open it
-                await inter.response.send_message(
-                    f"Could not open a round right now: {err}", ephemeral=True
-                )
-                return
-
             async def selection_picked(inter2: discord.Interaction, selection: str) -> None:
+                # Mint a FRESH commitment per bet, right here, immediately
+                # before opening the modal -- not once per game-pick. A
+                # commitment is single-use: the first bet's settle_round()
+                # flips it open -> revealed, so reusing one closure'd
+                # commitment across every selection from the same dropdown
+                # made every bet after the first fail with "not open"
+                # (defect 8). Minting it here also means the hash the
+                # player is shown (inside the modal, defect 14) is always
+                # the hash THIS bet actually settles against, never stale.
+                try:
+                    published = games.commit(money.user(self.owner_id))
+                except Exception as err:  # noqa: BLE001 -- refuse the round, don't half-open it
+                    await inter2.response.send_message(
+                        f"Could not open a round right now: {err}", ephemeral=True
+                    )
+                    return
                 await inter2.response.send_modal(
                     _BetModal(game, selection, money.user(self.owner_id),
-                              published["commitment_id"])
+                              published["commitment_id"], published["server_seed_hash"])
                 )
 
             await inter.response.send_message(
                 f"Pick your {GAME_LABELS[game].lower()} selection.\n"
-                f"Committed before you stake {SEP} server_seed_hash: "
-                f"`{published['server_seed_hash']}`\n"
-                f"Check it against the revealed seed with Verify after the round.",
+                f"Each bet gets its own fresh commitment -- its hash will show on "
+                f"the bet form itself. Check it against the revealed seed with "
+                f"Verify after the round.",
                 view=pickers.OptionPickerView(self.owner_id, selection_options, selection_picked),
                 ephemeral=True,
             )
@@ -257,7 +290,32 @@ class CasinoPanelView(discord.ui.View):
     @discord.ui.button(label="Verify a round", style=discord.ButtonStyle.secondary)
     async def verify_pick(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
         rounds = queries.list_recent_rounds(limit=15)
-        options = [(f"{r['game']} {SEP} {r['id']}"[:100], r["id"]) for r in rounds]
+
+        def _round_label(r: dict) -> str:
+            # Player-facing label: game name, when it settled, and the
+            # outcome if we can read one out of outcome_json -- never the
+            # raw round id or the raw internal game key. The id still goes
+            # in the option VALUE (the user never sees that), same pattern
+            # as admin.py's "Resolve market" picker.
+            game_label = GAME_LABELS.get(r["game"], r["game"])
+            bits = [game_label]
+            settled_at = r.get("settled_at")
+            if settled_at:
+                bits.append(str(settled_at))
+            outcome_json = r.get("outcome_json")
+            if outcome_json:
+                try:
+                    outcome = json.loads(outcome_json)
+                except (TypeError, ValueError):
+                    outcome = None
+                if isinstance(outcome, dict):
+                    if outcome.get("face") is not None:
+                        bits.append(f"result {outcome['face']}")
+                    elif outcome.get("roll") is not None:
+                        bits.append(f"rolled {outcome['roll']}")
+            return f" {SEP} ".join(bits)[:100]
+
+        options = [(_round_label(r), r["id"]) for r in rounds]
 
         async def picked(inter: discord.Interaction, round_id: str) -> None:
             if round_id == "_none":

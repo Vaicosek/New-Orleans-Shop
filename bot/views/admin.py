@@ -23,6 +23,25 @@ from ..ui.embed import money_text, panel_embed, price_line, rows
 from .. import queries
 
 
+# Cap on an outcome label's length, set when a market is OPENED. It exists
+# so _ResolveConfirmModal's typed-confirmation TextInput (max_length=100)
+# can never be asked to hold a longer label than Discord will let the user
+# submit -- see _OpenMarketModal.on_submit and _ResolveConfirmModal below.
+OUTCOME_LABEL_MAX = 100
+
+# How much of a (possibly up-to-100-char) outcome label staff are actually
+# asked to retype at resolution. The full label is still shown for
+# legibility; the token is a truncated prefix of it, not an id, so what's
+# typed stays human-legible per the "typed confirmation is a NAME never an
+# id" rule -- it just isn't a typing ordeal for a label near the cap.
+CONFIRM_TOKEN_MAX = 40
+
+
+def _confirm_token(label: str, limit: int = CONFIRM_TOKEN_MAX) -> str:
+    label = label.strip()
+    return label if len(label) <= limit else label[:limit].rstrip()
+
+
 class _StaffGatedView(discord.ui.View):
     def __init__(self, owner_id: int, config, timeout: float = 300) -> None:
         super().__init__(timeout=timeout)
@@ -310,9 +329,32 @@ class _StockDeltaModal(discord.ui.Modal):
         await interaction.response.defer(ephemeral=True)
         try:
             delta = int(str(self.delta.value).strip())
-            new_qty = catalog.adjust_stock(self.item["id"], delta)
-        except (catalog.CatalogError, ValueError) as err:
+        except ValueError as err:
             await interaction.followup.send(f"Could not adjust stock: {err}", ephemeral=True)
+            return
+        try:
+            new_qty = catalog.adjust_stock(self.item["id"], delta)
+        except catalog.CatalogError:
+            # catalog's own error names the item by its raw database id --
+            # correct for its own callers, but staff here only ever picked a
+            # NAME from the item picker and never saw an id. Re-report by
+            # name, with the figures that explain the refusal (current
+            # pieces on hand and what this change would have made it),
+            # rather than surfacing the id-bearing message verbatim.
+            name = self.item["name"]
+            try:
+                current = catalog.get_stock(self.item["id"])["pieces"]
+                attempted = current + delta
+                await interaction.followup.send(
+                    f"Could not adjust stock for {name}: currently {current} piece(s), "
+                    f"change of {delta:+d} would make {attempted} — out of bounds.",
+                    ephemeral=True,
+                )
+            except catalog.CatalogError:
+                await interaction.followup.send(
+                    f"Could not adjust stock for {name}: change of {delta:+d} was refused.",
+                    ephemeral=True,
+                )
             return
         await interaction.followup.send(
             f"{self.item['name']} is now at {new_qty} pieces.", ephemeral=True
@@ -349,6 +391,20 @@ class _OpenMarketModal(discord.ui.Modal, title="Open a prediction market"):
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
         outcome_list = [o.strip() for o in str(self.outcomes.value).split(",") if o.strip()]
+        # An outcome label this long can never be typed back at resolution:
+        # _ResolveConfirmModal's confirmation TextInput is capped at
+        # OUTCOME_LABEL_MAX chars, and Discord refuses client-side to submit
+        # a longer field, which would leave the market permanently stuck
+        # open. Reject rather than silently truncate a label the player
+        # will see and bet against.
+        too_long = [o for o in outcome_list if len(o) > OUTCOME_LABEL_MAX]
+        if too_long:
+            bad = "; ".join(f"{o[:40]}... ({len(o)} chars)" for o in too_long)
+            await interaction.followup.send(
+                f"Outcome label(s) too long (max {OUTCOME_LABEL_MAX} chars): {bad}",
+                ephemeral=True,
+            )
+            return
         try:
             market_id = predictions.open_market(
                 str(self.question.value).strip(), outcome_list,
@@ -363,27 +419,37 @@ class _OpenMarketModal(discord.ui.Modal, title="Open a prediction market"):
 
 
 class _ResolveConfirmModal(discord.ui.Modal):
-    """Typed confirmation for an irreversible payout: the winning outcome's
-    NAME, never the market's id."""
+    """Typed confirmation for an irreversible payout: a short, human-legible
+    token drawn from the winning outcome's NAME (never the market's or
+    outcome's id, and never the full label verbatim if it's a long one --
+    see `_confirm_token`)."""
 
-    def __init__(self, market: dict, outcome: str, resolver: str):
+    def __init__(self, market: dict, outcome: str, resolver: str, event_id: str):
         super().__init__(title="Confirm resolution", timeout=300)
         self.market, self.outcome, self.resolver = market, outcome, resolver
+        # Minted ONCE, at the outcome-picked preview (see
+        # AdminPanelView.resolve_market's outcome_picked), and carried
+        # unchanged through _ResolveGate into here, so a Discord retry or a
+        # resubmit of this same modal reuses the identical event id and
+        # lands on predictions.resolve's own idempotent replay instead of
+        # minting a second, different id that resolve() would then refuse
+        # as AlreadyResolved.
+        self.event_id = event_id
+        self.token = _confirm_token(outcome)
         self.confirm = discord.ui.TextInput(
-            label=f"Type the winning outcome: {outcome}"[:45],
-            placeholder="Type it exactly as shown above", max_length=100,
+            label=f"Type the winning outcome: {self.token}"[:45],
+            placeholder="Type it exactly as shown above", max_length=CONFIRM_TOKEN_MAX,
         )
         self.add_item(self.confirm)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
-        if str(self.confirm.value).strip().lower() != self.outcome.strip().lower():
+        if str(self.confirm.value).strip().lower() != self.token.strip().lower():
             await interaction.followup.send("Outcome didn't match · resolution cancelled.",
                                              ephemeral=True)
             return
-        event_id = money.new_event_id("pred.resolve")
         try:
-            result = predictions.resolve(self.market["id"], self.outcome, event_id,
+            result = predictions.resolve(self.market["id"], self.outcome, self.event_id,
                                         actor=self.resolver)
         except (predictions.MarketError, money.MoneyError) as err:
             await interaction.followup.send(f"Could not resolve: {err}", ephemeral=True)
@@ -455,6 +521,29 @@ class AdminPanelView(_StaffGatedView):
             ephemeral=True,
         )
 
+    @discord.ui.button(label="Retire / restore", style=discord.ButtonStyle.secondary)
+    async def retire(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        # Reversible toggle, not irreversible like resolve/void -- so this
+        # follows Adjust stock's pattern (picker, then the staff gate
+        # already re-checked on every click by _StaffGatedView.interaction_check
+        # is the whole confirmation), not a typed-confirmation modal.
+        # active_only=False so an already-retired item is still reachable
+        # here to be restored.
+        async def picked(inter: discord.Interaction, item: dict) -> None:
+            await inter.response.defer(ephemeral=True)
+            if item["active"]:
+                catalog.deactivate_item(item["id"])
+                await inter.followup.send(f"{item['name']} retired.", ephemeral=True)
+                return
+            catalog.activate_item(item["id"])
+            await inter.followup.send(f"{item['name']} restored.", ephemeral=True)
+
+        await interaction.response.send_message(
+            "Pick an item to retire or restore:",
+            view=pickers.ItemPickerView(self.owner_id, picked, active_only=False),
+            ephemeral=True,
+        )
+
     @discord.ui.button(label="Set threshold", style=discord.ButtonStyle.secondary)
     async def threshold(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
         async def picked(inter: discord.Interaction, item: dict) -> None:
@@ -506,10 +595,19 @@ class AdminPanelView(_StaffGatedView):
                 if outcome is None:
                     await inter2.response.send_message("That outcome no longer exists.", ephemeral=True)
                     return
+                # Minted here, at the FIRST preview of this resolution, and
+                # carried unchanged through _ResolveGate and into
+                # _ResolveConfirmModal -- never re-minted on modal submit.
+                # That way a Discord-retried interaction or a staff resubmit
+                # of the confirm modal reuses the same event id both times
+                # and lands on predictions.resolve's own idempotent replay
+                # rather than minting a second id that resolve() refuses as
+                # AlreadyResolved even though the first resolve succeeded.
+                event_id = money.new_event_id("pred.resolve")
                 await inter2.response.send_message(
                     f"Resolving \"{market['question']}\" to \"{outcome}\" will pay every winning "
                     f"stake pro-rata out of a pool of {money_text(market['pool'])}. This cannot be undone.",
-                    view=_ResolveGate(market, outcome, money.user(inter2.user.id)),
+                    view=_ResolveGate(market, outcome, money.user(inter2.user.id), event_id),
                     ephemeral=True,
                 )
 
@@ -576,14 +674,15 @@ class AdminPanelView(_StaffGatedView):
 
 
 class _ResolveGate(discord.ui.View):
-    def __init__(self, market: dict, outcome: str, resolver: str) -> None:
+    def __init__(self, market: dict, outcome: str, resolver: str, event_id: str) -> None:
         super().__init__(timeout=120)
         self.market, self.outcome, self.resolver = market, outcome, resolver
+        self.event_id = event_id
 
     @discord.ui.button(label="Confirm resolution", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
         await interaction.response.send_modal(
-            _ResolveConfirmModal(self.market, self.outcome, self.resolver)
+            _ResolveConfirmModal(self.market, self.outcome, self.resolver, self.event_id)
         )
 
 

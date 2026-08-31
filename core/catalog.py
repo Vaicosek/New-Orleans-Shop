@@ -224,6 +224,17 @@ def deactivate_item(item_id: int, *, conn: Optional[sqlite3.Connection] = None) 
             raise NoSuchItem(f"no such item {item_id}")
 
 
+def activate_item(item_id: int, *, conn: Optional[sqlite3.Connection] = None) -> None:
+    """The inverse of `deactivate_item` -- restores an item to `search()`
+    and the active-only picker. Nothing about capacity or price needs
+    recomputing here; deactivation never touched them either."""
+    with db_in(conn) as c:
+        cur = c.execute("UPDATE items SET active = 1, updated_at = datetime('now') WHERE id = ?",
+                         (item_id,))
+        if cur.rowcount != 1:
+            raise NoSuchItem(f"no such item {item_id}")
+
+
 def get_item(item_id: int, *, conn: Optional[sqlite3.Connection] = None) -> dict[str, Any]:
     with db_in(conn) as c:
         row = c.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()

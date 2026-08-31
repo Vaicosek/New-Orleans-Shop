@@ -23,7 +23,6 @@ def build_shop_embed() -> discord.Embed:
     # order lives, so this never re-derives it and drifts from the site.
     cats = catalog.categories_with_items(active_only=True, include_empty=False)
     lines: list[str] = []
-    any_stock = False
     for cat in cats:
         lines.append(f"**{cat['name']}**")
         for group in cat["groups"]:
@@ -34,19 +33,21 @@ def build_shop_embed() -> discord.Embed:
                 qty = stock["pieces"]
                 line = price_line(it["name"], it["price_coins"], it["price_unit_pieces"],
                                    it["stack_size"])
-                # Omit the stock clause entirely for an unstocked item --
-                # "(0/3456 in stock)" on every row when nothing is stocked
-                # is noise, not information, and it wraps the row on a
-                # phone screen for no reason.
+                # Every item is real content and gets a row -- CONTRACT.md
+                # section 7 bars decorated absence, not real rows. Zero
+                # stock is a fact about that one item, not a reason to drop
+                # it (or the rest of the sheet) from the page.
                 if qty > 0:
-                    any_stock = True
                     line += f"  ({qty} in stock)"
+                else:
+                    line += "  (out of stock)"
                 lines.append(line)
 
-    if cats and not any_stock:
-        body = "The shop isn't stocked yet."
-    else:
-        body = rows(lines, empty_text="No items in the catalog yet.")
+    # The one-line message is for a genuinely empty catalog -- zero active
+    # items, so `cats` itself came back empty -- never for a catalog that
+    # has items but no stock on any of them; that case still renders the
+    # full sheet above, every row marked "(out of stock)".
+    body = rows(lines, empty_text="No items in the catalog yet.")
     return panel_embed("New Orleans shop", body)
 
 
@@ -84,25 +85,47 @@ class _QuantityModal(discord.ui.Modal):
             await interaction.followup.send(f"Could not open that order: {err}", ephemeral=True)
             return
 
-        await interaction.followup.send(
-            f"Opened order #{order_id}: {pieces} × {self.item['name']} "
-            f"({quote['price_label']}, worth {money_text(quote['total_coins'])} "
-            f"at payout). "
-            f"Posted in the orders channel for workers to claim.",
-            ephemeral=True,
-        )
-
+        # Post the card BEFORE telling the requester it's done -- the
+        # success message used to be sent first and unconditionally, so a
+        # missing channel, a permissions error, or a network hiccup on
+        # `channel.send` failed silently after the requester had already
+        # been told the order was posted for workers to claim. The order
+        # itself (`order_id`) still exists and is still claimable through
+        # `/orders` even if the card never posts -- only the PUBLIC card is
+        # at risk here, not the order.
         channel = None
         if self.channel_id is not None:
             channel = interaction.client.get_channel(self.channel_id)
-        if channel is not None:
-            embed = order_views.build_order_embed(order_id)
-            posted = await channel.send(embed=embed, view=order_views.OrderCardView())
-            # Write the message back onto the order. Persistent buttons
-            # re-resolve their subject from the message they sit on, so
-            # without this the card can never be refreshed after approval.
-            if posted is not None:
-                orders_core.set_message(order_id, str(channel.id), str(posted.id))
+
+        post_note = ""
+        if channel is None:
+            post_note = (
+                " Could not find the orders channel to post a public card -- "
+                "the order still exists and can be worked from /orders."
+            )
+        else:
+            try:
+                embed = order_views.build_order_embed(order_id)
+                posted = await channel.send(embed=embed, view=order_views.OrderCardView())
+            except discord.HTTPException as err:
+                post_note = (
+                    f" Could not post the public order card ({err}) -- the order "
+                    "still exists and can be worked from /orders."
+                )
+            else:
+                # Write the message back onto the order. Persistent buttons
+                # re-resolve their subject from the message they sit on, so
+                # without this the card can never be refreshed after approval.
+                if posted is not None:
+                    orders_core.set_message(order_id, str(channel.id), str(posted.id))
+                    post_note = " Posted in the orders channel for workers to claim."
+
+        await interaction.followup.send(
+            f"Opened order #{order_id}: {pieces} × {self.item['name']} "
+            f"({quote['price_label']}, worth {money_text(quote['total_coins'])} "
+            f"at payout).{post_note}",
+            ephemeral=True,
+        )
 
 
 # The site's own address. Not a config value: it is the one place this shop
