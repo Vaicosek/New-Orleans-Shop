@@ -257,6 +257,17 @@ string — mirroring AbexTech's own `test_no_wagering_surface.py`, scoped to the
 
 ## 10. Website
 
+**Domain: `neworleansshop.org`** (registered 31 Aug 2026). The `.com` is held by a
+parking service and was never an operating business; the name itself is not a
+registrable mark -- "New Orleans" plus a generic noun is primarily geographically
+descriptive under Lanham Act S2(e)(2) -- so there is nothing to collide with. The
+market's Discord display name stays **New Orleans**; `nola` remains internal only (S2).
+
+Reached over a Cloudflare tunnel pointed at `NOLA_WEB_PORT`. The OAuth2 redirect URI
+is `https://neworleansshop.org/auth/callback` -- the public https address, never
+localhost and never the tunnel's internal port, and it must match the Developer
+Portal entry byte for byte.
+
 Three audiences, one shell.
 
 | Route | Who | Notes |
