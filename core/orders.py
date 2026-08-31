@@ -416,6 +416,73 @@ def reprice(order_id: int, price_coins: int, price_unit_pieces: int | None = Non
         return _row(row)
 
 
+def preview_approval(order_id: int, approver: str, *,
+                      conn: Optional[sqlite3.Connection] = None) -> dict[str, Any]:
+    """Read-only dry run of `approve()`'s payout maths, for showing staff the
+    exact figure they are about to confirm -- never on a screen without
+    computing it first (CONTRACT.md sec 8 rule "the unit is the content").
+
+    Runs every guard `approve()` runs (self-approval, ZeroPrice, ZeroPayout)
+    and raises the SAME exceptions, so a preview that comes back clean is a
+    reliable promise: `approve()` on the same, unchanged order pays exactly
+    `total_coins` split exactly as `per_claim` shows. It computes with
+    `split_charge` over the SAME `ORDER BY claimed_at, id` ordering `approve()`
+    uses, so it is not a separate estimate that could drift from the real
+    payout -- it is the real payout, just not written yet.
+    """
+    approver = normalise_subject(approver)
+    with db_in(conn) as c:
+        order = c.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
+        if order is None:
+            raise NoSuchOrder(f"no such order {order_id}")
+        if order["status"] != "awaiting_verification":
+            raise NotClaimable(
+                f"order {order_id} is {order['status']}, not awaiting_verification"
+            )
+
+        worked = c.execute(
+            "SELECT 1 FROM order_claims WHERE order_id = ? AND worker = ?",
+            (order_id, approver),
+        ).fetchone()
+        if worked is not None:
+            raise SelfApproval(
+                f"{approver} claimed or fulfilled order {order_id}; cannot approve their own order"
+            )
+
+        price = order["price_coins"]
+        unit_pieces = order["price_unit_pieces"]
+        if not price or price <= 0:
+            raise ZeroPrice(
+                f"order {order_id} has snapshot price {price!r}; refusing to pay a zero-coin claim"
+            )
+
+        claims = c.execute(
+            "SELECT * FROM order_claims WHERE order_id = ? ORDER BY claimed_at, id",
+            (order_id,),
+        ).fetchall()
+        payouts = split_charge([cl["delivered"] for cl in claims], price, unit_pieces)
+
+        delivered_total = sum(cl["delivered"] for cl in claims)
+        if delivered_total > 0 and sum(payouts) <= 0:
+            raise ZeroPayout(
+                f"order {order_id} delivered {delivered_total} piece(s) but its whole "
+                f"payout computes to 0 at {price:,} {CURRENCY} per {unit_pieces} "
+                f"piece(s); refusing to pay zero and close -- reprice or cancel it"
+            )
+
+        per_claim = [
+            {"worker": normalise_subject(cl["worker"]), "delivered_pieces": cl["delivered"],
+             "amount": amount}
+            for cl, amount in zip(claims, payouts) if amount > 0
+        ]
+        return {
+            "order_id": order_id,
+            "total_coins": sum(payouts),
+            "paid_claims": len(per_claim),
+            "per_claim": per_claim,
+        }
+
+
 def approve(order_id: int, approver: str, *,
             conn: Optional[sqlite3.Connection] = None) -> dict[str, int]:
     """Verify and pay out a fully-produced order. Pays each claim via

@@ -249,6 +249,7 @@ age_wallet("u:21")
 mkt2 = predictions.open_market("Coin toss", ["heads", "tails"], created_by="owner")
 predictions.stake(mkt2, "u:20", "heads", 200)
 predictions.stake(mkt2, "u:21", "heads", 150)
+predictions.close(mkt2)
 res3 = predictions.resolve(mkt2, "tails", money.new_event_id("pred.resolve"))
 check("no winners means paid_out is 0", res3["paid_out"] == 0)
 check("the whole pool lands with the house", res3["remainder"] + res3["rake"] == res3["pool"])
@@ -318,6 +319,7 @@ for trial in range(200):
         outcomes_chosen.append(outcome)
 
     winner = random.choice(["A", "B"])
+    predictions.close(mkt_r)
     r = predictions.resolve(mkt_r, winner, money.new_event_id("pred.resolve"))
     if r["paid_out"] + r["rake"] + r["remainder"] != r["pool"]:
         conservation_failures += 1

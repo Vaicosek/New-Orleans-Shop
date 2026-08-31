@@ -261,7 +261,8 @@ card.edits.clear()
 rec = Recorder()
 # Constructed exactly as bot/views/orders.py's approve-queue picker builds
 # it: no origin channel/message, because the panel never had them.
-gate = order_views._ApproveGate(order_id, "u:4242")
+preview = orders_core.preview_approval(order_id, "u:4242")
+gate = order_views._ApproveGate(order_id, "u:4242", total_coins=preview["total_coins"])
 run(gate.confirm(FakeInteraction(rec, roles=[STAFF_ROLE], channel=FakeChannel(card)),
                  FakeButton()))
 

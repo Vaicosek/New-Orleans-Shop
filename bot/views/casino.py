@@ -64,20 +64,49 @@ def build_result_embed(result: dict) -> discord.Embed:
     )
 
 
+# Plain-words label for each of verify()'s four independent checks, in the
+# same order games.verify()'s docstring lists them. All four render every
+# time -- a tampered round used to show only two of these (seed vs outcome)
+# and call itself INVALID with no way to tell a player which of the four
+# actually broke.
+_VERIFY_CHECKS = [
+    ("seed_matches_commitment", "Revealed seed hashes to the committed hash"),
+    ("commitment_matches_round", "Round was played against that same commitment, unchanged"),
+    ("committed_before_bets", "Commitment existed before the first bet"),
+    ("outcome_matches", "Outcome recomputes from the seed, client seed and nonce"),
+]
+
+
 def build_verify_embed(round_id: str) -> discord.Embed:
     try:
         v = games.verify(round_id)
     except games.GameError as err:
         return panel_embed("Verify round", f"Could not verify: {err}")
-    body = (
-        f"Commitment matches: {v['seed_matches_commitment']}\n"
-        f"Outcome matches: {v['outcome_matches']}\n"
-        f"Overall: {'VALID' if v['ok'] else 'INVALID'}\n\n"
-        f"server_seed: {v['server_seed']}\n"
-        f"server_seed_hash: {v['server_seed_hash']}\n"
-        f"client_seed: {v['client_seed']}\n"
-        f"nonce: {v['nonce']}"
-    )
+
+    failed_labels = []
+    check_lines = []
+    for key, label in _VERIFY_CHECKS:
+        passed = v[key]
+        check_lines.append(f"{'PASS' if passed else 'FAIL'} {SEP} {label}")
+        if not passed:
+            failed_labels.append(label)
+
+    verdict = "VALID" if v["ok"] else "INVALID"
+    lines = [f"Overall: {verdict}", ""] + check_lines
+    if failed_labels:
+        lines += ["", "Failed: " + "; ".join(failed_labels)]
+    # The pre-bet commitment hash -- from the COMMITMENT row, never the
+    # round's own copy -- is the value a player who saved the commitment
+    # message should be comparing against.
+    committed_hash = v["commitment_server_seed_hash"] or "(no commitment on record)"
+    lines += [
+        "",
+        f"server_seed: {v['server_seed']}",
+        f"committed server_seed_hash: {committed_hash}",
+        f"client_seed: {v['client_seed']}",
+        f"nonce: {v['nonce']}",
+    ]
+    body = "\n".join(lines)
     return panel_embed(f"Verify {SEP} {v['game']} round", body)
 
 

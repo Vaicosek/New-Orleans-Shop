@@ -811,6 +811,13 @@ def verify(round_id: str, *, conn: Optional[sqlite3.Connection] = None) -> dict:
                    and committed_before_bets and outcome_matches),
         "server_seed": row["server_seed"],
         "server_seed_hash": row["server_seed_hash"],
+        # The hash the COMMITMENT row published, before the bet -- distinct
+        # from server_seed_hash above (the round's own copy, which is what
+        # commitment_matches_round is checking for tampering). This is the
+        # value a player who saved the pre-bet commitment message should
+        # compare against, so it needs its own field rather than reusing
+        # the round's copy under the same name.
+        "commitment_server_seed_hash": crow["server_seed_hash"] if crow is not None else None,
         "client_seed": row["client_seed"],
         "nonce": row["nonce"],
         "outcome": stored,

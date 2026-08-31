@@ -276,11 +276,25 @@ class OrderCardView(discord.ui.View):
                 f"Order #{order_id} is {order['status']}, not ready to approve.", ephemeral=True
             )
             return
+        # Compute the exact payout BEFORE the gate is ever shown -- the
+        # number staff confirm has to be the number that actually leaves
+        # treasury, not a promise that one will be computed later.
+        approver = money.user(interaction.user.id)
+        try:
+            preview = orders_core.preview_approval(order_id, approver)
+        except (orders_core.OrderError, money.MoneyError) as err:
+            await interaction.followup.send(f"Could not approve: {err}", ephemeral=True)
+            return
         label = price_label(order["price_coins"], order["price_unit_pieces"], order["stack_size"])
+        breakdown = "\n".join(
+            f"  {SEP} {cl['worker']}: {cl['delivered_pieces']} piece(s) {SEP} {money_text(cl['amount'])}"
+            for cl in preview["per_claim"]
+        )
         await interaction.followup.send(
-            f"Approving order #{order_id} ({order['item_name']}, {label}) will pay every "
-            f"claim's delivered pieces from the shop treasury. Confirm below.",
-            view=_ApproveGate(order_id, money.user(interaction.user.id),
+            f"Approving order #{order_id} ({order['item_name']}, {label}) will pay "
+            f"**{money_text(preview['total_coins'])}** from the shop treasury across "
+            f"{preview['paid_claims']} claim(s):\n{breakdown}",
+            view=_ApproveGate(order_id, approver, total_coins=preview["total_coins"],
                                origin_channel_id=interaction.channel_id,
                                origin_message_id=interaction.message.id),
             ephemeral=True,
@@ -293,12 +307,21 @@ class _ApproveGate(discord.ui.View):
     real access control. A second danger-coloured click on real numbers is
     the confirmation; a name you can already read is not a secret."""
 
-    def __init__(self, order_id: int, approver: str, *,
+    def __init__(self, order_id: int, approver: str, *, total_coins: int,
                  origin_channel_id: int | None = None, origin_message_id: int | None = None):
         super().__init__(timeout=120)
         self.order_id, self.approver = order_id, approver
         self.origin_channel_id = origin_channel_id
         self.origin_message_id = origin_message_id
+        # The gold figure staff confirm has to BE the figure that leaves
+        # treasury -- put it on the button itself, not just in the text
+        # above it, so a scroll-past click still sees the number. Real
+        # discord.py rebinds a decorated button's method name to the actual
+        # Button item in View.__init__ (see discord/ui/view.py); the
+        # lightweight test stub does not, so guard with isinstance rather
+        # than assuming the rebind happened.
+        if isinstance(self.confirm, discord.ui.Button):
+            self.confirm.label = f"Confirm \u2014 pay {money_text(total_coins)}"[:80]
 
     @discord.ui.button(label="Confirm approval", style=discord.ButtonStyle.primary)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
@@ -405,11 +428,22 @@ class OrdersPanelView(discord.ui.View):
                 await inter.response.send_message("Nothing awaiting approval.", ephemeral=True)
                 return
             order = queries.get_order_detail(int(order_id_str))
+            approver = money.user(inter.user.id)
+            try:
+                preview = orders_core.preview_approval(order["id"], approver)
+            except (orders_core.OrderError, money.MoneyError) as err:
+                await inter.response.send_message(f"Could not approve: {err}", ephemeral=True)
+                return
             label = price_label(order["price_coins"], order["price_unit_pieces"], order["stack_size"])
+            breakdown = "\n".join(
+                f"  {SEP} {cl['worker']}: {cl['delivered_pieces']} piece(s) {SEP} {money_text(cl['amount'])}"
+                for cl in preview["per_claim"]
+            )
             await inter.response.send_message(
-                f"Approving order #{order['id']} ({order['item_name']}, {label}) will pay every "
-                f"claim's delivered pieces from the shop treasury. Confirm below.",
-                view=_ApproveGate(order["id"], money.user(inter.user.id)),
+                f"Approving order #{order['id']} ({order['item_name']}, {label}) will pay "
+                f"**{money_text(preview['total_coins'])}** from the shop treasury across "
+                f"{preview['paid_claims']} claim(s):\n{breakdown}",
+                view=_ApproveGate(order["id"], approver, total_coins=preview["total_coins"]),
                 ephemeral=True,
             )
 

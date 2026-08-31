@@ -236,6 +236,14 @@ def resolve(market_id: int, outcome_label: str, event_id: str, *,
             conn: Optional[sqlite3.Connection] = None) -> dict:
     """Resolve `market_id` to `outcome_label`, keyed on `event_id`.
 
+    Requires the market already CLOSED (see `close()`). This is not a
+    formality: staff pick the outcome before the preview/confirm modal is
+    shown, and that confirm step is the exact window an insider who already
+    knows the outcome would use to slip in a stake. Refusing to resolve an
+    open market forces every caller -- the admin UI included -- to close the
+    market at the moment staff commit to resolving it, so the window never
+    opens in the first place.
+
     `event_id` must be minted at the source with `money.new_event_id(...)` --
     never reconstructed from a timestamp. Calling this again with the SAME
     event id on an already-resolved market is a safe replay (returns the
@@ -263,8 +271,12 @@ def resolve(market_id: int, outcome_label: str, event_id: str, *,
                 f"market {market_id} already resolved by a different event"
             )
 
-        if market["status"] not in ("open", "closed"):
-            raise MarketNotOpen(market["status"])
+        if market["status"] != "closed":
+            raise MarketNotOpen(
+                f"market {market_id} is {market['status']}, not closed -- "
+                "call close() before resolve() so no stake can land inside "
+                "the resolve confirmation window"
+            )
 
         winning_outcome_id = _outcome_id(c, market_id, outcome_label)
 

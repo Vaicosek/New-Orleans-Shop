@@ -479,7 +479,22 @@ class AdminPanelView(_StaffGatedView):
             if market_id_str == "_none":
                 await inter.response.send_message("No markets to resolve.", ephemeral=True)
                 return
-            market = queries.get_market_detail(int(market_id_str))
+            market_id = int(market_id_str)
+            # Close the moment staff commit to resolving THIS market -- before
+            # the outcome picker, the preview, or the confirm modal are ever
+            # shown. That gap is exactly the window an insider who already
+            # knows the outcome could use to slip in a stake; closing here
+            # means predictions.resolve() (which now requires a closed
+            # market) never has to trust that nothing landed in between.
+            try:
+                predictions.close(market_id)
+            except predictions.MarketNotOpen:
+                pass  # already closed is fine; voided/resolved is caught below
+            market = queries.get_market_detail(market_id)
+            if market is None or market["status"] != "closed":
+                await inter.response.send_message(
+                    "That market is no longer open for resolution.", ephemeral=True)
+                return
             # Keyed on the outcome's id, never its label text -- see
             # bot/views/pickers.py's note on why a long label makes an
             # unkeyed picker unbuildable.

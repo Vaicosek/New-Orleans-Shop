@@ -560,6 +560,7 @@ age_wallet("u:211")
 mkt = predictions.open_market("all losers", ["yes", "no"], created_by="owner", rake_bps=1000)
 predictions.stake(mkt, "u:210", "no", 300)
 predictions.stake(mkt, "u:211", "no", 400)
+predictions.close(mkt)
 res = predictions.resolve(mkt, "yes", money.new_event_id("pred.resolve"))
 check_invariant("4b everyone loses", res)
 check("4b whole pool (rake + remainder) lands with the house when nobody backed the winner",
@@ -585,6 +586,7 @@ age_wallet("u:221")
 mkt = predictions.open_market("max rake", ["yes", "no"], created_by="owner", rake_bps=1000)
 predictions.stake(mkt, "u:220", "yes", 500)
 predictions.stake(mkt, "u:221", "no", 500)
+predictions.close(mkt)
 res = predictions.resolve(mkt, "yes", money.new_event_id("pred.resolve"))
 check_invariant("4d max rake_bps", res)
 check("4d rake is exactly 10% of the pool", res["rake"] == 100, f"{res}")
@@ -600,6 +602,7 @@ age_wallet("u:230")
 mkt = predictions.open_market("self hedge", ["yes", "no"], created_by="owner", rake_bps=250)
 predictions.stake(mkt, "u:230", "yes", 300)
 predictions.stake(mkt, "u:230", "no", 700)
+predictions.close(mkt)
 res = predictions.resolve(mkt, "no", money.new_event_id("pred.resolve"))
 check_invariant("4f self-hedged single subject", res)
 check("4f self-hedged subject cannot come out ahead of their own pool minus rake",
@@ -626,6 +629,7 @@ for trial, (total, n_parts, other_amount, rake_bps) in enumerate([
                                      rake_bps=rake_bps)
     predictions.stake(mkt_c, "u:300", "A", total)
     predictions.stake(mkt_c, "u:301", "B", other_amount)
+    predictions.close(mkt_c)
     res_c = predictions.resolve(mkt_c, "A", money.new_event_id("pred.resolve"))
     control_payout = res_c["paid_out"]
 
@@ -643,6 +647,7 @@ for trial, (total, n_parts, other_amount, rake_bps) in enumerate([
         if amt > 0:
             predictions.stake(mkt_e, "u:300", "A", amt)
     predictions.stake(mkt_e, "u:301", "B", other_amount)
+    predictions.close(mkt_e)
     res_e = predictions.resolve(mkt_e, "A", money.new_event_id("pred.resolve"))
     split_payout = res_e["paid_out"]
 
@@ -668,6 +673,7 @@ for j in range(400, 404):
 mkt5 = predictions.open_market("void vs resolve race", ["yes", "no"], created_by="owner")
 for j in range(400, 404):
     predictions.stake(mkt5, f"u:{j}", "yes" if j % 2 else "no", 200)
+predictions.close(mkt5)
 
 race_errors: list[str] = []
 race_results: list[str] = []
@@ -883,6 +889,7 @@ total_pred_loss = 0
 for i in range(4):
     mkt_i = predictions.open_market(f"loss visibility {i}", ["yes", "no"], created_by="owner")
     predictions.stake(mkt_i, "u:801", "no", 4_000)
+    predictions.close(mkt_i)
     predictions.resolve(mkt_i, "yes", money.new_event_id("pred.resolve"))  # nobody backs "yes": total loss
     total_pred_loss += 4_000
 
@@ -981,6 +988,7 @@ money.mint("u:901", 1_000, service="owner", reason="seed")
 age_wallet("u:901")
 mkt9 = predictions.open_market("audit replay", ["yes", "no"], created_by="owner")
 predictions.stake(mkt9, "u:901", "yes", 200)
+predictions.close(mkt9)
 ev9 = money.new_event_id("pred.resolve")
 predictions.resolve(mkt9, "yes", ev9, actor="u:staffer")
 predictions.resolve(mkt9, "yes", ev9, actor="u:staffer")   # replay, same event id
