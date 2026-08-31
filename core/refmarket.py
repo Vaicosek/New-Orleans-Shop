@@ -119,6 +119,22 @@ def record(*, rows: int, error: str | None) -> None:
         )
 
 
+def _who_blocked(body: str) -> str:
+    """Name what refused us, so the next step is obvious from one log line.
+
+    A Cloudflare challenge and an application-level "you need a key" look
+    identical from the status code alone, and they need opposite responses:
+    one is an edge setting their operator can change in a click, the other is
+    a conversation about an API key.
+    """
+    text = (body or "")[:2000].lower()
+    if "cloudflare" in text or "cf-ray" in text or "attention required" in text:
+        return "Cloudflare at the edge (a bot-protection setting, not their app)"
+    if "api key" in text or "unauthorized" in text or "token" in text:
+        return "their application (it wants credentials)"
+    return "the server (no reason given)"
+
+
 async def pull() -> tuple[int, str | None]:
     """One cycle. Returns (rows stored, error or None). Never raises.
 
@@ -148,6 +164,24 @@ async def pull() -> tuple[int, str | None]:
                             stored = store(items)
                             record(rows=stored, error=msg)
                             return stored, msg
+                        record(rows=0, error=msg)
+                        return 0, msg
+                    if resp.status in (401, 403):
+                        # Their server saying no to this client. robots.txt
+                        # grants `use=reference` to a general agent, but the
+                        # live edge is the enforcement and it wins over the
+                        # file. There is no fix here that is not evasion --
+                        # spoofing a browser User-Agent to get past a 403 is
+                        # exactly the behaviour the block exists to stop, and
+                        # this project will not do it. The way through is to
+                        # ask DiplomaticaMC's operator for access, not to
+                        # dress up as something else. So: report it, plainly,
+                        # and stop trying until someone changes something.
+                        hint = _who_blocked(await resp.text())
+                        msg = (f"HTTP {resp.status} from {SOURCE} -- blocked by {hint}. "
+                               f"Not retrying and not spoofing a browser: ask their "
+                               f"operator to allow this client, or set "
+                               f"NOLA_REFMARKET_ENABLED=0.")
                         record(rows=0, error=msg)
                         return 0, msg
                     if resp.status != 200:

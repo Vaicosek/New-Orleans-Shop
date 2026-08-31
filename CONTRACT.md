@@ -407,11 +407,17 @@ Python, and the staff view joins in Python through the same function; a second c
 rule in SQL would be two rules that have to agree forever, failing as an empty column
 rather than an error. Unmatched items still appear, with empty columns.
 
-**Not yet verified in production.** The pull has never run from the panel — this
-environment's egress cannot reach the host, so the parser is proven against a captured real
-payload (`tests/test_refmarket.py`) and nothing more. The boot block's
-`reference market:` line is the verification, and until it reads `last success` this
-feature is unproven.
+**Blocked as of the first live run.** The first cycle from the panel returned **HTTP 403**.
+robots.txt grants `use=reference`, but the live edge is the enforcement and it wins over
+the file. There is no fix on our side that is not evasion: putting a browser
+`User-Agent` on this client to get past a 403 is precisely the behaviour the block exists
+to stop, and this project will not do it. `403`/`401` are therefore terminal for the cycle,
+logged with a line naming whether Cloudflare or their application refused, and the way
+through is to **ask DiplomaticaMC's operator** to allow this client — or to set
+`NOLA_REFMARKET_ENABLED=0` and leave it off. Everything downstream (schema, parser, staff
+view, health line) is built and tested against a real captured payload and will work the
+moment a request gets through; the boot block's `reference market:` line reading
+`last success` is the only thing that counts as verification.
 
 ## 13. Open — John decides
 
