@@ -151,6 +151,80 @@ _MIGRATIONS: list[str] = [
 ]
 
 
+# game_rounds.game's CHECK constraint gained 'slots' when the third casino
+# game shipped. SQLite cannot ALTER a CHECK constraint in place, so an
+# existing database needs the table rebuilt: create it fresh under the new
+# (wider) CHECK, copy every row across untouched, then swap names. This DDL
+# is a duplicate of schema.sql's game_rounds definition on purpose -- same
+# convention core/games.py's `_ensure_schema`/`_COMMITMENTS_DDL` already
+# uses for a content-probed, idempotent fallback -- and the two must be kept
+# in sync if game_rounds ever gains another column or constraint.
+_GAME_ROUNDS_REBUILD_DDL = """
+CREATE TABLE game_rounds (
+    id               TEXT    PRIMARY KEY,
+    game             TEXT    NOT NULL CHECK (game IN ('coinflip', 'dice', 'slots')),
+    server_seed_hash TEXT    NOT NULL,
+    server_seed      TEXT,
+    client_seed      TEXT    NOT NULL,
+    nonce            INTEGER NOT NULL,
+    outcome_json     TEXT,
+    state            TEXT    NOT NULL DEFAULT 'open'
+                             CHECK (state IN ('open', 'settled', 'voided')),
+    created_at       TEXT    NOT NULL DEFAULT (datetime('now')),
+    settled_at       TEXT,
+    commitment_id    TEXT,
+    CHECK ((state = 'settled') = (server_seed IS NOT NULL AND outcome_json IS NOT NULL))
+)
+"""
+
+
+def _migrate_game_rounds_check(conn: sqlite3.Connection) -> None:
+    """Content-probed like every migration here: reads game_rounds' own
+    CREATE SQL out of sqlite_master and does nothing if it already allows
+    'slots' -- true immediately on any fresh database, since schema.sql's
+    own CREATE TABLE IF NOT EXISTS already created it with the wide CHECK
+    before this function ever runs; only a database created before slots
+    shipped needs the rebuild below.
+    """
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='game_rounds'"
+    ).fetchone()
+    if row is None or row["sql"] is None or "slots" in row["sql"]:
+        return
+    # Two pragmas matter here, not one. `foreign_keys=OFF` stops
+    # game_bets' ON DELETE CASCADE from firing while the table is briefly
+    # gone. `legacy_alter_table=ON` matters MORE and is easy to miss: by
+    # default (OFF, since SQLite 3.25) `ALTER TABLE ... RENAME` REWRITES
+    # every other table's FOREIGN KEY clause that names the renamed table --
+    # so a plain rename of game_rounds to a scratch name silently repoints
+    # game_bets.round_id at that scratch name, and it stays pointed there
+    # after the scratch table is dropped, leaving a dangling reference
+    # `PRAGMA foreign_key_check` flags but nothing else notices until a
+    # cascade or a join quietly stops working. `legacy_alter_table=ON`
+    # reverts RENAME to the old behaviour (touches only the named table),
+    # so game_bets' clause stays literally "REFERENCES game_rounds(id)"
+    # throughout and resolves again the moment the real name exists.
+    # Caught by tests/test_slots.py running this exact migration against a
+    # pre-slots table with a real referencing row, not by inspection.
+    conn.execute("PRAGMA foreign_keys=OFF")
+    conn.execute("PRAGMA legacy_alter_table=ON")
+    try:
+        conn.execute("ALTER TABLE game_rounds RENAME TO game_rounds_pre_slots")
+        conn.execute(_GAME_ROUNDS_REBUILD_DDL)
+        conn.execute(
+            "INSERT INTO game_rounds "
+            "(id, game, server_seed_hash, server_seed, client_seed, nonce, "
+            " outcome_json, state, created_at, settled_at, commitment_id) "
+            "SELECT id, game, server_seed_hash, server_seed, client_seed, nonce, "
+            "       outcome_json, state, created_at, settled_at, commitment_id "
+            "FROM game_rounds_pre_slots"
+        )
+        conn.execute("DROP TABLE game_rounds_pre_slots")
+    finally:
+        conn.execute("PRAGMA legacy_alter_table=OFF")
+        conn.execute("PRAGMA foreign_keys=ON")
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
     for stmt in _MIGRATIONS:
         try:
@@ -159,6 +233,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
             # "duplicate column name" means this migration already ran.
             if "duplicate column" not in str(err).lower():
                 raise
+    _migrate_game_rounds_check(conn)
 
 
 def seed_if_empty(conn: Optional[sqlite3.Connection] = None) -> int:

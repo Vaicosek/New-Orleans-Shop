@@ -274,7 +274,7 @@ CREATE INDEX IF NOT EXISTS ix_stakes_market ON pred_stakes(market_id, outcome_id
 -- settlement reveals it. Anyone can recompute the outcome afterwards.
 CREATE TABLE IF NOT EXISTS game_rounds (
     id               TEXT    PRIMARY KEY,
-    game             TEXT    NOT NULL CHECK (game IN ('coinflip', 'dice')),
+    game             TEXT    NOT NULL CHECK (game IN ('coinflip', 'dice', 'slots')),
     server_seed_hash TEXT    NOT NULL,
     server_seed      TEXT,
     client_seed      TEXT    NOT NULL,

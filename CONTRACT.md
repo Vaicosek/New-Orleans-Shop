@@ -263,8 +263,11 @@ to correct outcome. `rake_bps` configurable, **default 0**. Stake places a *hold
 captures losers and credits winners in one transaction keyed on the market's resolve event id.
 Resolution is staff-only, preview-then-confirm, typed market name.
 
-**Casino — house-banked.** Small on purpose: coinflip and dice first. House edge is an explicit
-config number per game, never an emergent property of the payout maths.
+**Casino — house-banked.** Small on purpose: coinflip, dice and slots. House edge is an explicit
+config number per game, never an emergent property of the payout maths. Slots pays a
+different multiplier per symbol combination (`GAME_CONFIG["slots"]["payout_table"]`) instead
+of one flat payout, but the same rule applies: RTP and edge are derived algebraically from
+the reel weights and pinned by a regression test, never left as a byproduct of the payout maths.
 
 **Provably fair, both.** Commit `sha256(server_seed)` before the round, reveal `server_seed` at
 settlement, mix with a player-supplied `client_seed` and a `nonce`. `/casino` panel has a
@@ -423,8 +426,7 @@ moment a request gets through; the boot block's `reference market:` line reading
 ## 13. Open — John decides
 
 1. ~~**Currency name.**~~ Decided and DONE: gold ingots, symbol `g`, whole numbers (S2, S5). The leftover `core.config.currency_name`/`CURRENCY_NAME` setting has been **removed** -- it is gone from `core/config.py` and no code reads it. Nothing is left for the integrator to retire here; the only surviving mention is a historical note in a `bot/ui/embed.py` docstring recording that an earlier version took the argument.
-2. **Casino games beyond coinflip and dice.** Blackjack and roulette are real work; worth it
-   only if people will actually play them.
+2. ~~**Casino games beyond coinflip and dice.**~~ Decided and DONE: slots shipped (commit-reveal per-reel draws via `_uniform_int_positioned`, RTP 91.975%, edge 8.025%). Blackjack and roulette remain undecided -- real work, worth it only if people will actually play them.
 3. **Prediction market rake.** Default 0 — you take nothing. A rake makes you the house in a
    way pari-mutuel otherwise does not.
 4. **Who is staff on Diplomatica.** Discord IDs for the allowlist, when you have them.

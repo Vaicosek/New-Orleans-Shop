@@ -1,7 +1,12 @@
 """core/games.py -- house-banked, provably-fair casino games.
 
-Two games only, on purpose: coinflip and dice. Both share one commit/reveal
-scheme and one settlement path.
+Three games, on purpose kept small: coinflip, dice and slots. All three
+share one commit/reveal scheme and one settlement path. Coinflip and dice
+pay one flat multiplier on any win; slots pays a DIFFERENT multiplier per
+winning combination (see `GAME_CONFIG["slots"]` and `_payout_bps` below) --
+the only real difference between the three, and it is contained entirely in
+how a payout multiplier is looked up, never in the commit/reveal/settle
+machinery itself.
 
 Provably fair, in one paragraph
 --------------------------------
@@ -55,6 +60,11 @@ the actual edge to silently drift from the documented one.
 
     coinflip: win chance 1/2, fair multiplier 2.00x, pays 1.96x  -> edge  2%
     dice:     win chance 1/6, fair multiplier 6.00x, pays 5.70x  -> edge  5%
+    slots:    3-reel, weighted strip, pays only on 3-of-a-kind -- there is
+              no single "the" multiplier, so the edge is the probability-
+              weighted sum over every winning combination (RTP), derived
+              next to `GAME_CONFIG["slots"]` below rather than carried as
+              one number here: RTP 91.975%, edge 8.025%, win chance 12.25%.
 
 Money flow -- house-banked, never mints
 -----------------------------------------
@@ -136,6 +146,40 @@ GAME_CONFIG: dict[str, dict[str, Any]] = {
         # win pays 5.70x stake. Fair (P=1/6) would be 6.00x.
         # edge = 1 - 5.70/6.00 = 5%
         "payout_bps": 57_000,
+    },
+    # Slots pays a MULTIPLE outcomes, not one flat win/lose: three reels,
+    # drawn independently from the same weighted strip, pay only on
+    # three-of-a-kind (no partial-match consolation -- a short paytable
+    # that is easy to price exactly beats a long one that is hard to).
+    # `reel_strip`'s counts ARE the probabilities -- cherry sits on 9 of the
+    # strip's 20 positions, so P(cherry) = 9/20 -- rather than a separate
+    # probability table that could drift out of sync with it by hand.
+    # `selections` is a single dummy value: there is nothing to predict in
+    # slots, only to spin, but every other game settles through a selection
+    # so this one keeps the same call shape rather than special-casing it.
+    #
+    # RTP, computed exactly from the two tables below (and re-derived
+    # algebraically by tests/test_slots.py so a future edit here cannot
+    # silently drift the edge the way the old `digest[0] % 6` dice bug did):
+    #   P(ccc) = (9/20)^3 = 729/8000   pays 3x   -> contributes  2187/8000
+    #   P(lll) = (6/20)^3 = 27/1000    pays 6x   -> contributes   162/1000
+    #   P(bbb) = (3/20)^3 = 27/8000    pays 25x  -> contributes   675/8000
+    #   P(sss) = (2/20)^3 = 1/1000     pays 400x -> contributes   400/1000
+    #   RTP = 3679/4000 = 91.975%  ->  edge = 321/4000 = 8.025%
+    #   win probability (any 3-of-a-kind) = 49/400 = 12.25%
+    "slots": {
+        "selections": ("spin",),
+        "reels": 3,
+        "reel_strip": {"cherry": 9, "lemon": 6, "bell": 3, "seven": 2},
+        # Multiplier paid on three-of-a-kind, in bps (10_000 = 1.00x) --
+        # same unit as every payout_bps above, so it can share settlement
+        # code with coinflip and dice.
+        "payout_table": {
+            "cherry": 30_000,    # 3x
+            "lemon": 60_000,     # 6x
+            "bell": 250_000,     # 25x
+            "seven": 4_000_000,  # 400x -- the jackpot
+        },
     },
 }
 
@@ -283,6 +327,43 @@ def _uniform_int(server_seed: str, client_seed: str, nonce: int, n: int) -> int:
         counter += 1
 
 
+def _uniform_int_positioned(server_seed: str, client_seed: str, nonce: int,
+                            n: int, position: int) -> int:
+    """Like `_uniform_int`, but for a round that needs several INDEPENDENT
+    draws from the same (server_seed, client_seed, nonce) -- slots' three
+    reels. `position` is folded into the HMAC message so each reel gets its
+    own draw; a verifier reproduces a reel by folding in the same position,
+    never by mutating client_seed itself. Kept as its own function (not an
+    optional parameter on `_uniform_int`) so coinflip and dice's message
+    format, and the recomputation of every already-settled round of theirs,
+    never changes."""
+    if not isinstance(n, int) or isinstance(n, bool) or n <= 0:
+        raise ValueError("n must be a positive int")
+    limit = (2 ** 32 // n) * n
+    counter = 0
+    while True:
+        digest = hmac.new(server_seed.encode(),
+                          f"{client_seed}:{nonce}:{position}:{counter}".encode(),
+                          hashlib.sha256).digest()
+        for off in range(0, 32, 4):
+            word = int.from_bytes(digest[off:off + 4], "big")
+            if word < limit:
+                return word % n
+        counter += 1
+
+
+def _draw_symbol(strip: dict[str, int], index: int) -> str:
+    """Map a uniform draw in [0, total_weight) to a symbol. The strip is
+    walked in a fixed (dict-insertion) order, so the same index always maps
+    to the same symbol for both settlement and verification -- this is a
+    lookup, never a second random choice."""
+    for symbol, count in strip.items():
+        if index < count:
+            return symbol
+        index -= count
+    raise AssertionError("index out of range for this reel strip")
+
+
 def _outcome(game: str, server_seed: str, client_seed: str, nonce: int) -> dict:
     """The ONE draw both settlement and verification go through, so they can
     never disagree about what a round produced."""
@@ -291,13 +372,51 @@ def _outcome(game: str, server_seed: str, client_seed: str, nonce: int) -> dict:
     if game == "coinflip":
         return {"face": "heads" if _uniform_int(server_seed, client_seed, nonce, 2) == 0
                 else "tails"}
-    return {"roll": _uniform_int(server_seed, client_seed, nonce, 6) + 1}  # dice
+    if game == "dice":
+        return {"roll": _uniform_int(server_seed, client_seed, nonce, 6) + 1}
+    # slots: one independent draw per reel position, same strip each time.
+    strip = GAME_CONFIG[game]["reel_strip"]
+    total = sum(strip.values())
+    reels = [
+        _draw_symbol(strip, _uniform_int_positioned(server_seed, client_seed, nonce, total, i))
+        for i in range(GAME_CONFIG[game]["reels"])
+    ]
+    return {"reels": reels}
 
 
 def _wins(game: str, selection: str, outcome: dict) -> bool:
     if game == "coinflip":
         return selection == outcome["face"]
     return selection == str(outcome["roll"])  # dice
+
+
+def _payout_bps(game: str, selection: str, outcome: dict) -> int:
+    """The multiplier THIS outcome pays, in bps (0 = lose) -- the one call
+    settle_round makes to price any bet on any game. Coinflip and dice are a
+    flat multiplier on a plain win/lose (`_wins`, above); slots prices
+    per-symbol on three-of-a-kind and 0 on anything else. `selection` is
+    unused for slots (there is nothing to predict, only to spin) but stays
+    in the signature so every game prices through the same call shape."""
+    if game in ("coinflip", "dice"):
+        return GAME_CONFIG[game]["payout_bps"] if _wins(game, selection, outcome) else 0
+    if game == "slots":
+        reels = outcome["reels"]
+        if len(set(reels)) == 1:
+            return GAME_CONFIG[game]["payout_table"][reels[0]]
+        return 0
+    raise UnknownGame(game)
+
+
+def _max_payout_bps(game: str) -> int:
+    """The best case for the player on this game, in bps -- what
+    `place_bet` checks `treasury:games` could afford before a bet is ever
+    accepted. Coinflip and dice have exactly one nonzero payout; slots'
+    best case is the jackpot symbol's multiplier, the largest entry in its
+    paytable, not an arbitrary one."""
+    cfg = GAME_CONFIG[game]
+    if game == "slots":
+        return max(cfg["payout_table"].values())
+    return cfg["payout_bps"]
 
 
 # --------------------------------------------------------------- commitments
@@ -473,7 +592,7 @@ def place_bet(round_id: str, subject: str, selection: str, amount: int, *,
         # settle_round's pending-payout path for the (rarer, concurrent-bet)
         # case where the treasury still runs dry between this check and
         # settlement despite passing here.
-        profit_if_win = (amount * cfg["payout_bps"]) // 10_000 - amount
+        profit_if_win = (amount * _max_payout_bps(game)) // 10_000 - amount
         if profit_if_win > 0 and _treasury_capacity(c) < profit_if_win:
             raise HouseInsolvent(
                 f"the house cannot currently fund a win on this {amount:,} {CURRENCY} "
@@ -610,7 +729,6 @@ def settle_round(round_id: str, *, conn: Optional[sqlite3.Connection] = None) ->
 
         game = row["game"]
         outcome = json.loads(row["outcome_json"])
-        cfg = GAME_CONFIG[game]
 
         money.ensure_wallet(TREASURY, conn=c)
 
@@ -624,8 +742,9 @@ def settle_round(round_id: str, *, conn: Optional[sqlite3.Connection] = None) ->
         pending_coins = 0    # profit decided but not automatically payable -- a debt
         ops: list[dict] = []
         for bet in bets:
-            win = _wins(game, bet["selection"], outcome)
-            payout_total = (bet["amount"] * cfg["payout_bps"]) // 10_000 if win else 0
+            payout_bps = _payout_bps(game, bet["selection"], outcome)
+            win = payout_bps > 0
+            payout_total = (bet["amount"] * payout_bps) // 10_000
             event_id = money.new_event_id("game.settle")
 
             claim_cur = c.execute(

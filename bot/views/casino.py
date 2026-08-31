@@ -1,9 +1,9 @@
 """Casino panel: game picker, bet, round history, fairness verify.
 
-Coinflip and dice only, per CONTRACT.md section 9. Every round result carries
-a persistent "Verify" button -- registered once at boot with no round id
-attached, re-resolving the round from the message it is on -- so a bet made
-before a restart can still be checked afterwards.
+Coinflip, dice and slots, per CONTRACT.md section 9. Every round result
+carries a persistent "Verify" button -- registered once at boot with no
+round id attached, re-resolving the round from the message it is on -- so a
+bet made before a restart can still be checked afterwards.
 """
 from __future__ import annotations
 
@@ -20,11 +20,23 @@ from ..ui.embed import SEP, money_text, panel_embed, rows
 
 _ROUND_MARK = re.compile(r"round:(\S+)")
 
-GAME_LABELS = {"coinflip": "Coinflip", "dice": "Dice"}
+GAME_LABELS = {"coinflip": "Coinflip", "dice": "Dice", "slots": "Slots"}
 SELECTION_LABELS = {
     "coinflip": [("Heads", "heads"), ("Tails", "tails")],
     "dice": [(f"Roll {n}", str(n)) for n in range(1, 7)],
+    # Slots has nothing to predict, only to spin -- one dummy selection so
+    # it settles through the same call shape as every other game (see
+    # core.games._payout_bps). CasinoPanelView.play skips the picker step
+    # entirely when there is only one option, so this never costs a click.
+    "slots": [("Spin", "spin")],
 }
+
+_SLOT_SYMBOLS = {"cherry": "🍒", "lemon": "🍋",
+                 "bell": "🔔", "seven": "7️⃣"}
+
+
+def _reels_text(reels: list[str]) -> str:
+    return " ".join(_SLOT_SYMBOLS.get(r, r) for r in reels)
 
 
 def _round_footer(round_id: str, code: str) -> str:
@@ -50,11 +62,19 @@ def parse_round_id(message: discord.Message | None) -> str | None:
     return m.group(1) if m else None
 
 
+def _outcome_text(game: str, outcome: dict) -> str:
+    if game == "coinflip":
+        return outcome.get("face")
+    if game == "dice":
+        return f"rolled {outcome.get('roll')}"
+    return _reels_text(outcome.get("reels", []))  # slots
+
+
 def build_result_embed(result: dict) -> discord.Embed:
     bet = result["results"][0] if result["results"] else None
     game = result["game"]
     outcome = result["outcome"]
-    outcome_text = outcome.get("face") if game == "coinflip" else f"rolled {outcome.get('roll')}"
+    outcome_text = _outcome_text(game, outcome)
     if bet is None:
         body = f"Round settled: {outcome_text}."
     else:
@@ -270,6 +290,17 @@ class CasinoPanelView(discord.ui.View):
                               published["commitment_id"], published["server_seed_hash"])
                 )
 
+            # Slots has exactly one selection ("spin") -- nothing to choose,
+            # so making the player pick it from a one-item dropdown would be
+            # a click that exists only because the code shape wanted it. Go
+            # straight to selection_picked on the SAME interaction (its
+            # .response is still unused here, same as it would be inside
+            # the picker's own callback) whenever there is only one option;
+            # any future single-selection game gets this for free too.
+            if len(selection_options) == 1:
+                await selection_picked(inter, selection_options[0][1])
+                return
+
             await inter.response.send_message(
                 f"Pick your {GAME_LABELS[game].lower()} selection.\n"
                 f"Each bet gets its own fresh commitment -- its hash will show on "
@@ -294,9 +325,10 @@ class CasinoPanelView(discord.ui.View):
             # Three real outcomes, not two: a voided round (core.games._void_round)
             # refunds the stake in full and stores that refund in payout_coins too
             # -- so `payout_coins` truthy does not mean "won". Every win pays out
-            # strictly more than the stake (every GAME_CONFIG payout_bps exceeds
-            # 10,000), so the stake itself is the dividing line: 0 is a loss, exactly
-            # the stake back is a void/refund, anything above the stake is a win.
+            # strictly more than the stake (every payout core.games._payout_bps can
+            # return for a win exceeds 10,000 bps, slots' smallest included), so the
+            # stake itself is the dividing line: 0 is a loss, exactly the stake back
+            # is a void/refund, anything above the stake is a win.
             payout = b["payout_coins"]
             if payout <= 0:
                 return "lost"
@@ -340,6 +372,8 @@ class CasinoPanelView(discord.ui.View):
                         bits.append(f"result {outcome['face']}")
                     elif outcome.get("roll") is not None:
                         bits.append(f"rolled {outcome['roll']}")
+                    elif outcome.get("reels") is not None:
+                        bits.append(_reels_text(outcome["reels"]))
             return f" {SEP} ".join(bits)[:100]
 
         options = [(_round_label(r), r["id"]) for r in rounds]
