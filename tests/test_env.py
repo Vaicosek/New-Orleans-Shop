@@ -93,6 +93,45 @@ for entrypoint in ("run_shop.py", "run_web.py"):
     check(f"{entrypoint} loads .env before importing core", not late,
           f"imported first: {', '.join(late)} -- core.db resolves NOLA_DB_PATH at import time")
 
+print("\nNOLA_DB_PATH='' (present but blank, the shape Wispbyte's own panel ships) "
+      "must fall back to the default, not resolve to the current directory")
+
+import subprocess  # noqa: E402
+
+blank_probe = subprocess.run(
+    [sys.executable, "-c",
+     "import os; os.environ['NOLA_DB_PATH'] = ''; "
+     "import sys; sys.path.insert(0, %r); "
+     "from core import db; print(db.DB_PATH)" % str(ROOT)],
+    capture_output=True, text=True,
+)
+check("a blank NOLA_DB_PATH doesn't crash core.db at import time",
+      blank_probe.returncode == 0, blank_probe.stderr[-500:])
+resolved = blank_probe.stdout.strip()
+check("a blank NOLA_DB_PATH resolves to the neworleans.db default, "
+      "not Path('') (the current directory -- what sqlite3 can't open as a file)",
+      resolved not in ("", ".") and resolved.endswith("neworleans.db"), resolved)
+
+unset_probe = subprocess.run(
+    [sys.executable, "-c",
+     "import sys; sys.path.insert(0, %r); "
+     "from core import db; print(db.DB_PATH)" % str(ROOT)],
+    capture_output=True, text=True,
+)
+check("an ABSENT NOLA_DB_PATH resolves the same way a blank one now does",
+      unset_probe.stdout.strip() == resolved,
+      f"unset={unset_probe.stdout.strip()!r} blank={resolved!r}")
+
+set_probe = subprocess.run(
+    [sys.executable, "-c",
+     "import os; os.environ['NOLA_DB_PATH'] = '/tmp/explicit-path.db'; "
+     "import sys; sys.path.insert(0, %r); "
+     "from core import db; print(db.DB_PATH)" % str(ROOT)],
+    capture_output=True, text=True,
+)
+check("an explicitly-set NOLA_DB_PATH still wins over the default",
+      set_probe.stdout.strip() == "/tmp/explicit-path.db", set_probe.stdout.strip())
+
 print()
 if FAILS:
     print(f"{len(FAILS)} FAILED: {', '.join(FAILS)}")

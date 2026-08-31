@@ -18,7 +18,13 @@ from pathlib import Path
 from typing import Iterator, Optional
 
 ROOT = Path(__file__).resolve().parent.parent
-DB_PATH = Path(os.environ.get("NOLA_DB_PATH", ROOT / "neworleans.db"))
+# `.get(..., default)` only helps when the key is ABSENT -- a `.env` line
+# left blank on purpose (Wispbyte's panel ships one: `NOLA_DB_PATH=`) sets
+# the key to '', which `.get` happily returns instead of the default,
+# giving `Path("")` == the current directory. sqlite3 then fails to open
+# that directory as a file with an unhelpful "unable to open database
+# file" -- exactly the outage this `or` exists to prevent.
+DB_PATH = Path(os.environ.get("NOLA_DB_PATH") or (ROOT / "neworleans.db"))
 SCHEMA_PATH = Path(__file__).resolve().parent / "schema.sql"
 
 _local = threading.local()
