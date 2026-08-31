@@ -18,6 +18,28 @@ from core.pricing import money_text
 from .theme import CSS
 from .auth import Identity
 
+# The city's mark, drawn once and reused. New Orleans is French-founded and
+# signs itself with the fleur-de-lis on the flag, the manhole covers and the
+# corner tiles; it is the one figure on this site that is not a number. Inline
+# so the page carries no image request, and `currentColor` so it takes the
+# gold from the masthead and the muted grey from the footer without a second
+# copy.
+FLEUR = (
+    '<svg class="lis" viewBox="0 0 24 24" aria-hidden="true" fill="currentColor">'
+    '<path d="M12 1.4c-1.6 2.1-2.5 3.9-2.5 5.5 0 1.4.6 2.6 1.5 3.6H9.2'
+    'c-2.6 0-4.6 1.5-4.6 3.7 0 1.8 1.3 3.1 3 3.1 1.3 0 2.3-.8 2.3-1.8'
+    ' 0-.8-.6-1.4-1.3-1.4-.4 0-.8.1-1 .4.2-.9.9-1.4 2-1.4h1.6v3.2'
+    'c0 2.1-.6 3.5-1.9 5.1h5.4c-1.3-1.6-1.9-3-1.9-5.1v-3.2h1.6'
+    'c1.1 0 1.8.5 2 1.4-.2-.3-.6-.4-1-.4-.7 0-1.3.6-1.3 1.4 0 1 1 1.8 2.3 1.8'
+    ' 1.7 0 3-1.3 3-3.1 0-2.2-2-3.7-4.6-3.7H13c.9-1 1.5-2.2 1.5-3.6'
+    ' 0-1.6-.9-3.4-2.5-5.5z"/>'
+    '<path d="M8.5 11.6h7v1.3h-7z"/>'
+    '</svg>'
+)
+
+BAND = '<div class="band"><i></i><i></i><i></i></div>'
+
+
 NAV: list[tuple[str, str, str]] = [
     ("Storefront", "/", "storefront"),
     ("Stock", "/stock", "stock"),
@@ -87,19 +109,23 @@ def page(title: str, nav_key: str, body: str, *,
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{esc(title)} — New Orleans</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;500&display=swap">
 <style>{CSS}</style>
 </head>
 <body>
 {_wallet_html(identity)}
 <header class="masthead">
-  <a class="brand" href="/"><span class="wordmark">New Orleans</span></a>
+  <a class="brand" href="/">{FLEUR}<span class="wordmark">New Orleans</span></a>
   <nav class="nav">{_nav_html(nav_key, identity)}</nav>
   <div class="who-wrap">{_who_html(identity)}</div>
 </header>
+{BAND}
 <main>
 {body}
 </main>
-<footer class="foot">New Orleans market — daily sheet.</footer>
+<footer class="foot">{FLEUR}<span>New Orleans market — daily sheet.</span></footer>
 </body>
 </html>"""
     return web.Response(text=doc, content_type="text/html", charset="utf-8", status=status)

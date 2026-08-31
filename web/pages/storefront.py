@@ -13,7 +13,7 @@ from core.catalog import categories_with_items, get_stock, list_items
 from core.pricing import price_label
 
 from ..auth import resolve_identity
-from ..shell import esc, page
+from ..shell import BAND, esc, page
 
 
 async def storefront(request: web.Request) -> web.Response:
@@ -51,7 +51,9 @@ async def storefront(request: web.Request) -> web.Response:
                     '<th>Item</th><th class="num">Price</th>'
                     f'</tr></thead><tbody>{rows}</tbody></table></div>'
                 )
-            sections.append(f'<h3>{esc(cat["name"])}</h3>' + "".join(group_html))
+            # The flag's band under each category heading -- the price sheet's
+            # only structure beyond the rules in the tables themselves.
+            sections.append(f'<h3>{esc(cat["name"])}</h3>{BAND}' + "".join(group_html))
         table = "".join(sections)
     else:
         table = '<p class="empty">Nothing stocked yet.</p>'
@@ -72,11 +74,21 @@ async def stock(request: web.Request) -> web.Response:
     rows = []
     for i in items:
         s = get_stock(i["id"])
+        # The one number on this page anybody decides on. Out is red, a
+        # quarter or less of capacity is the gold that means somebody owes a
+        # move, anything above that is plain. A shelf that is merely not full
+        # is not news and gets no colour.
+        if s["pieces"] <= 0:
+            tone = " s-stop"
+        elif s["capacity"] and s["pieces"] * 4 <= s["capacity"]:
+            tone = " s-wait"
+        else:
+            tone = ""
         rows.append(
             f'<tr><td>{esc(i["name"])}</td>'
             f'<td class="num">{esc(price_label(i["price_coins"], i["price_unit_pieces"], i["stack_size"]))}</td>'
-            f'<td class="num">{s["pieces"]:,}</td>'
-            f'<td class="num">{s["capacity"]:,}</td></tr>'
+            f'<td class="num{tone}">{s["pieces"]:,}</td>'
+            f'<td class="num dim">{s["capacity"]:,}</td></tr>'
         )
 
     if rows:

@@ -31,6 +31,27 @@ STATUS_WORDS = {
 }
 
 
+# Colour by what the state asks of somebody, not by which state it is: gold
+# when a move is owed, green when the money moved, red when it stopped, dim
+# when it belongs to nobody in particular. An unknown status gets no colour
+# rather than a guessed one.
+STATUS_TONE = {
+    "open": "s-open",
+    "claimed": "s-wait",
+    "awaiting_verification": "s-wait",
+    "fulfilled": "s-done",
+    "cancelled": "s-stop",
+}
+
+# Same three levels for the Today table's right-hand column.
+ACTOR_TONE = {
+    "You": "s-you",
+    "You, as staff": "s-you",
+    "Staff": "s-them",
+    "Open to all": "s-open",
+}
+
+
 def status_word(status: str) -> str:
     return STATUS_WORDS.get(status, status.replace("_", " ").capitalize())
 
@@ -70,7 +91,8 @@ def _claim_row(c: dict) -> str:
         f'<tr><td>#{c["order_id"]}</td><td>{esc(c["item_name"])}</td>'
         f'<td class="num">{price}</td>'
         f'<td class="num">{c["pieces"]:,}</td><td class="num">{c["delivered"]:,}</td>'
-        f'<td>{esc(status_word(c["status"]))}</td><td class="num">{paid}</td></tr>'
+        f'<td class="{STATUS_TONE.get(c["status"], "")}">{esc(status_word(c["status"]))}</td>'
+        f'<td class="num">{paid}</td></tr>'
     )
 
 
@@ -201,7 +223,8 @@ async def me(request: web.Request) -> web.Response:
             '<div class="tablewrap"><table><thead><tr>'
             '<th>What is waiting</th><th>Who can act</th>'
             '</tr></thead><tbody>'
-            + "".join(f'<tr><td>{what}</td><td class="dim">{esc(who)}</td></tr>'
+            + "".join(f'<tr><td>{what}</td>'
+                      f'<td class="{ACTOR_TONE.get(who, "s-open")}">{esc(who)}</td></tr>'
                       for what, who in waiting)
             + '</tbody></table></div>'
         )
