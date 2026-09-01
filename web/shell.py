@@ -43,7 +43,13 @@ FLEUR = (
 NAV: list[tuple[str, str, str]] = [
     ("Storefront", "/", "storefront"),
     ("Inventory", "/inventory", "stock"),
+    ("Auctions", "/auctions", "auctions"),
+    ("Land", "/land", "land"),
+    ("Orders", "/orders", "orders"),
+    ("Teams", "/teams", "teams"),
+    ("History", "/history", "history"),
     ("Hub", "/me", "account"),
+    ("Help", "/help", "help"),
 ]
 STAFF_NAV: tuple[str, str, str] = ("Ledger", "/ledger", "ledger")
 

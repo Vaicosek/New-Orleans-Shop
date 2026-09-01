@@ -21,6 +21,11 @@ logger = logging.getLogger("nola.web")
 PAGE_MODULES: list[tuple[str, list[str]]] = [
     ("web.auth", ["/login", "/auth/callback", "/logout"]),
     ("web.pages.storefront", ["/", "/inventory", "/stock", "/order"]),
+    ("web.pages.market", ["/auctions", "/land"]),
+    ("web.pages.orders", ["/orders"]),
+    ("web.pages.teams", ["/teams"]),
+    ("web.pages.history", ["/history"]),
+    ("web.pages.info", ["/help", "/terms"]),
     ("web.pages.account", ["/me"]),
     ("web.pages.ledger", ["/ledger"]),
 ]

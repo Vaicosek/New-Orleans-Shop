@@ -514,7 +514,14 @@ Three audiences, one shell.
 | `/` | public | storefront: what New Orleans stocks, what it costs |
 | `/inventory` | public | live table, both price bases |
 | `/stock` | public | the same page under the name it had before the owner renamed it. Same handler, not a redirect — a URL somebody has already pasted into Discord is a promise, and a rename is not a reason to break one |
-| `/me` | customer | Discord OAuth2. Own orders, balance, history |
+| `/auctions` | public | item lots currently open, leading bid, time left. Read-only -- bidding stays on the Discord card |
+| `/land` | public | plots currently listed, leading bid, buy-now price. Read-only, same reason |
+| `/orders` | public | the work board: live orders, what they pay, how far along. Read-only -- claiming stays in Discord |
+| `/teams` | public | every team, its manager and roster. Read-only -- joining stays in Discord |
+| `/history` | public | the last 40 things to finish: orders paid, lots won, plots sold |
+| `/help` | public | how the shop works, transcribed from this contract. Touches no database |
+| `/terms` | public | plain terms: gold has no real-world value, delivery is manual. No database |
+| `/me` | customer | Discord OAuth2. Own orders, balance, history, team |
 | `/order` | customer | POST only. Opens a production/restock request -- the site's one write route |
 | `/ledger` | staff | internal: balances, orders, payouts, audit trail |
 | `/health` | public | must answer when the bot is down |

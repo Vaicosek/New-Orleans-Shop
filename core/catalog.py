@@ -275,11 +275,38 @@ def list_items(*, active_only: bool = True,
 # ------------------------------------------------------------------ stock
 
 def get_stock(item_id: int, *, conn: Optional[sqlite3.Connection] = None) -> dict[str, Any]:
+    """Quantity on hand for an item.
+
+    `add_item` writes the `stock` row in the same transaction as the item,
+    so in a database this code built the two always exist together. A row
+    inserted by hand or by a migration can still leave an item with no
+    stock row, and the two cases are NOT the same fact: an unknown item id
+    is a caller bug and must stay loud, while a real item whose shelf was
+    never recorded is simply nothing on hand. Collapsing them into one
+    raise took the PUBLIC storefront and /inventory down with a 500 for
+    every visitor -- one missing child row, whole page gone -- which is a
+    far worse answer than "0 on hand" for a page whose entire job is to
+    answer when everything else is broken.
+
+    `capacity` is derived the same way `add_item` derives it rather than
+    guessed at zero, so a barrel that exists but was never stocked still
+    reports the size it can hold.
+    """
     with db_in(conn) as c:
         row = c.execute("SELECT * FROM stock WHERE item_id = ?", (item_id,)).fetchone()
-    if row is None:
+        if row is not None:
+            return _row(row)
+        item = c.execute(
+            "SELECT barrel_slots, stack_size FROM items WHERE id = ?", (item_id,)
+        ).fetchone()
+    if item is None:
         raise NoSuchItem(f"no such item {item_id}")
-    return _row(row)
+    return {
+        "item_id": item_id,
+        "pieces": 0,
+        "capacity": int(item["barrel_slots"] or 0) * int(item["stack_size"] or 0),
+        "updated_at": None,
+    }
 
 
 def set_stock(item_id: int, pieces: int, *,

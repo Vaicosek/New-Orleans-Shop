@@ -14,6 +14,7 @@ from aiohttp import web
 from core.db import connection
 from core.loyalty import summary as loyalty_summary
 from core.money import balance, public_history
+from core.teams import roster as team_roster, team_of
 from core.pricing import money_text, price_label
 
 from ..auth import resolve_identity
@@ -181,6 +182,39 @@ def _today(subject: str, staff: bool) -> list[tuple[str, str]]:
     return rows
 
 
+def _team_html(subject: str) -> str:
+    """The signed-in visitor's team, if they are on one. A member sees the
+    same roster their manager sees in Discord's `/team`; joining, leaving
+    and roster edits stay there, because those are the actions and this page
+    is the view."""
+    team = team_of(subject)
+    if team is None:
+        return ('<p class="empty">Not on a team &middot; join one from Discord\'s '
+                '<code>/team</code>.</p>')
+    is_manager = team["manager"] == subject
+    members = team_roster(team["id"])
+    who = "You run this team" if is_manager else f'Run by {esc(_short_id(team["manager"]))}'
+    if members:
+        names = ", ".join(esc(_short_id(m)) for m in members)
+    else:
+        names = "No members yet."
+    return (f'<div class="sums">'
+            f'<div class="row"><span>Team</span><span>{esc(team["name"])}</span></div>'
+            f'<div class="row"><span>{who}</span><span>{len(members)} member'
+            f'{"s" if len(members) != 1 else ""}</span></div>'
+            f'<div class="row"><span>Roster</span><span>{names}</span></div>'
+            f'</div>')
+
+
+def _short_id(subject: str) -> str:
+    """`u:` is internal database vocabulary; this process has no gateway
+    connection to resolve a Discord id into a display name, so it shows the
+    id itself rather than guessing at one."""
+    if isinstance(subject, str) and subject.startswith("u:"):
+        return subject.split(":", 1)[1]
+    return str(subject)
+
+
 async def me(request: web.Request) -> web.Response:
     identity = await resolve_identity(request)
     if identity is None:
@@ -253,6 +287,9 @@ async def me(request: web.Request) -> web.Response:
   <div class="row"><span>Order bonus</span><span>+{loy["payout_bonus_pct"]}% extra on completed orders</span></div>
   {f'<div class="row"><span>Next rank</span><span>{esc(loy["next_tier"]["name"])} in {loy["next_tier"]["points_needed"]:,} points</span></div>' if loy["next_tier"] else ''}
 </div>
+
+<h2>Your team</h2>
+{_team_html(identity.subject)}
 
 <h2>Your orders</h2>
 {claims_table}
