@@ -20,7 +20,7 @@ logger = logging.getLogger("nola.web")
 # aiohttp's generic "no route" or a dead process.
 PAGE_MODULES: list[tuple[str, list[str]]] = [
     ("web.auth", ["/login", "/auth/callback", "/logout"]),
-    ("web.pages.storefront", ["/", "/inventory", "/stock"]),
+    ("web.pages.storefront", ["/", "/inventory", "/stock", "/order"]),
     ("web.pages.account", ["/me"]),
     ("web.pages.ledger", ["/ledger"]),
 ]

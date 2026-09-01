@@ -181,6 +181,41 @@ tbody tr:hover td{background:var(--raised)}
   margin-top:2px;padding-top:11px}
 .sums .row.total span:first-child{color:var(--text)}
 
+/* The storefront's item grid. Still no cards -- the "no cards, no gradient,
+   no glow" rule in the header above stands: each item is separated from
+   the next by whitespace and a single hairline rule, the same border-bottom
+   the price-sheet tables already use, never a filled or bordered box. The
+   icon is Minecraft's own pixel art, so it is rendered unsmoothed
+   (`image-rendering:pixelated`) rather than blurred by browser scaling. */
+.itemgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));
+  gap:26px 20px;margin:16px 0 34px}
+.item{display:flex;flex-direction:column;align-items:flex-start;gap:5px;
+  padding-bottom:16px;border-bottom:1px solid var(--line)}
+.icon{width:40px;height:40px;image-rendering:pixelated;margin-bottom:4px}
+.icon-fallback{display:flex;align-items:center;justify-content:center;
+  background:var(--raised);color:var(--accent-deep);font-weight:900;font-size:17px}
+.item-name{font-size:15px;font-weight:700;color:var(--text);line-height:1.3}
+.item-price{font-size:15px;color:var(--accent);font-variant-numeric:tabular-nums}
+.item-stock{font-size:13px}
+
+/* One form per item, plain underlined figures rather than a boxed input --
+   the same "figures, not chrome" register as everything else numeric on
+   this page. */
+.order-form{display:flex;gap:8px;align-items:center;margin-top:5px;width:100%}
+.order-form input[type=number]{width:60px;background:transparent;border:none;
+  border-bottom:1px solid var(--line);color:var(--text);font-size:15px;
+  font-variant-numeric:tabular-nums;padding:2px 0}
+.order-form input[type=number]:focus{outline:none;border-bottom-color:var(--accent)}
+.order-form button{background:var(--accent);color:var(--ground-deep);border:none;
+  font-weight:900;font-size:12px;letter-spacing:.1em;text-transform:uppercase;
+  padding:8px 14px;cursor:pointer;font-family:inherit}
+.order-form button:hover{background:var(--pop)}
+.order-link{font-size:13px}
+
+/* A one-line confirmation after opening an order -- plain text in the
+   ledger's own "gain" green, no banner box. */
+.notice{color:var(--gain);font-size:16px;margin:14px 0}
+
 .foot{padding:22px 48px;border-top:1px solid var(--line);color:var(--inert);
   font-size:13px;letter-spacing:.06em;text-transform:uppercase;
   display:flex;align-items:center;gap:10px;background:var(--ground-deep)}
@@ -191,6 +226,7 @@ tbody tr:hover td{background:var(--raised)}
    a table row and becomes name-left / price-right, and the price is allowed
    to wrap instead of being clipped. */
 @media(max-width:560px){
+  .itemgrid{grid-template-columns:repeat(2,1fr);gap:22px 16px}
   .sheet table{min-width:0}
   .sheet thead{display:none}
   .sheet tr{display:flex;justify-content:space-between;gap:16px;

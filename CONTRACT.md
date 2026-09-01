@@ -400,6 +400,7 @@ Three audiences, one shell.
 | `/inventory` | public | live table, both price bases |
 | `/stock` | public | the same page under the name it had before the owner renamed it. Same handler, not a redirect — a URL somebody has already pasted into Discord is a promise, and a rename is not a reason to break one |
 | `/me` | customer | Discord OAuth2. Own orders, balance, history |
+| `/order` | customer | POST only. Opens a production/restock request -- the site's one write route |
 | `/ledger` | staff | internal: balances, orders, payouts, audit trail |
 | `/health` | public | must answer when the bot is down |
 
@@ -408,6 +409,25 @@ Auth is **OAuth2 only** (no `/website_login` code-mint path; that only makes sen
 with an existing bot). One cookie, one session store, and **one identity function** that every
 page resolves through. Staff is a Discord-ID allowlist, checked at the route, and the staff nav
 entry is omitted server-side rather than CSS-hidden.
+
+**The storefront is a grid, not a table** — each item shows a Minecraft item/block icon
+(bundled at `web/assets/icons/*.png`, inlined as a `data:` URI by `web/icons.py` so the page
+still needs no network to render; an item with no mapped icon gets a plain monogram tile, never
+a broken image request), its name, its price, and how many are on hand. Still **no cards** —
+the rule below stands. Items are separated by whitespace and the same hairline rule the
+price-sheet tables already use, never a filled or bordered box.
+
+**`/order` is the site's one exception to "no session" above and its first state-changing
+route.** Signed-in only; anonymous visitors get a "sign in to order" link, never a form that
+looks live but cannot be submitted. It opens a production/restock request the exact way
+Discord's shop panel does — `core.orders.create_order`, the same function, same validation,
+same audit trail — so an order is the same thing regardless of which surface opened it. No
+money moves here; that only ever happens at `/orders` approval in Discord. CSRF-protected the
+same way `/logout` is (the session's own token, checked with `secrets.compare_digest`). The
+web process holds no live Discord connection (see section 13's process split), so an order
+opened from the site is not pushed to the orders channel — it surfaces to workers the same way
+a card that failed to post already does: it exists and is claimable from Discord's `/orders`
+immediately, no push required.
 
 ### Design
 
