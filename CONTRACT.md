@@ -413,19 +413,19 @@ entry is omitted server-side rather than CSS-hidden.
 **The storefront is a grid, not a table** — each item shows a Minecraft item/block icon
 (bundled at `web/assets/icons/*.png`, inlined as a `data:` URI by `web/icons.py` so the page
 still needs no network to render; an item with no mapped icon gets a plain monogram tile, never
-a broken image request), its name, its price, and how many are on hand. Still **no cards** —
-the rule below stands. Items are separated by whitespace and the same hairline rule the
-price-sheet tables already use, never a filled or bordered box.
+a broken image request), its name, its price, and how many are on hand. Each item sits in its
+own boxed card (raised background, hairline border) so a large catalog stays easy to scan at a
+glance.
 
 **`/order` is the site's one exception to "no session" above and its first state-changing
 route.** Signed-in only; anonymous visitors get a "sign in to order" link, never controls that
 look live but cannot be submitted. A signed-in visitor checks off any number of items across
 the grid -- a plain checkbox per item, no cart page, no JavaScript anywhere on this site -- and
-picks a quantity for each with a radio-pill group (1 stack / 4 stacks / 16 stacks, or a typed
-"Custom" amount), then one submit opens a production/restock request for every checked item in
-a single POST. Each one goes through `core.orders.create_order` independently -- the same
-function, same validation, same audit trail Discord's shop panel uses -- so one bad line (a
-stale item id, a since-emptied custom field) never blocks the rest of the batch; only a fully
+types a quantity for each into a plain number field (pre-filled with one stack), then one
+submit opens a production/restock request for every checked item in a single POST. Each one
+goes through `core.orders.create_order` independently -- the same function, same validation,
+same audit trail Discord's shop panel uses -- so one bad line (a stale item id, a non-positive
+typed amount) never blocks the rest of the batch; only a fully
 empty result is a hard 400. The redirect reports exactly how many orders opened and, when some
 did not, how many were skipped. No money moves here; that only ever happens at `/orders`
 approval in Discord. CSRF-protected the same way `/logout` is (the session's own token, checked

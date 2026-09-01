@@ -7,10 +7,10 @@ never reaches this page.
 
 `/order` is the one exception to "no session" above: it is the site's first
 state-changing route (CONTRACT.md section 12), reachable only signed in. A
-signed-in visitor checks off any number of items across the grid, picks a
-quantity for each (a stack/4 stacks/16 stacks pill, or a typed custom
-amount -- no JavaScript anywhere on this site, so the pills are plain radio
-buttons, not a script-driven quantity field), and one submit opens a
+signed-in visitor checks off any number of items across the grid, types a
+piece count into a plain number field for each (no JavaScript anywhere on
+this site, so it is a bare `<input type=number>`, not a script-driven
+control), and one submit opens a
 production/restock request for every checked item in a single POST. Each
 one goes through `core.orders.create_order` -- the same function, same
 rules, same audit trail Discord's shop panel uses -- independently, so one
@@ -49,23 +49,19 @@ def _icon_html(item_name: str) -> str:
 
 
 def _cart_controls_html(item: dict) -> str:
-    """Checkbox + quantity pills for one item, inside the page's single
-    cart form. No JavaScript: the quantity choice is a plain radio group
-    (1 stack / 4 stacks / 16 stacks / a typed custom amount), not a script
-    writing into a shared field, so this works exactly the same with
-    scripting off."""
+    """Checkbox + a single quantity field for one item, inside the page's
+    single cart form. No JavaScript: the quantity is a plain
+    `<input type=number>` the visitor types a piece count into, not a
+    script-driven control, so this works exactly the same with scripting
+    off. Pre-filled with one stack so a visitor who just wants "the usual"
+    amount can check the box and go."""
     item_id = item["id"]
     stack = item["stack_size"]
     return f"""<div class="cart-controls">
 <label class="cart-check"><input type="checkbox" name="items" value="{item_id}"> Select</label>
-<div class="qty-pills">
-<label><input type="radio" name="qty_{item_id}" value="{stack}" checked> {stack:,}</label>
-<label><input type="radio" name="qty_{item_id}" value="{stack * 4}"> {stack * 4:,}</label>
-<label><input type="radio" name="qty_{item_id}" value="{stack * 16}"> {stack * 16:,}</label>
-<label class="qty-custom"><input type="radio" name="qty_{item_id}" value="custom"> Custom
-<input type="number" name="qty_custom_{item_id}" min="1" max="999999" inputmode="numeric"
-       aria-label="Custom quantity"></label>
-</div>
+<label class="qty-field">Qty
+<input type="number" name="qty_{item_id}" value="{stack}" min="1" max="999999"
+       inputmode="numeric" aria-label="Quantity"></label>
 </div>"""
 
 
@@ -203,12 +199,10 @@ async def inventory(request: web.Request) -> web.Response:
 
 
 def _resolve_pieces(form, item_id: int) -> int:
-    """A checked item's quantity: whichever radio pill was chosen, or the
-    typed custom field when "custom" was chosen. Raises ValueError for
-    anything that isn't a positive whole number -- the caller turns that
-    into a per-item skip, never a whole-batch failure."""
-    choice = str(form.get(f"qty_{item_id}", "")).strip()
-    raw = str(form.get(f"qty_custom_{item_id}", "")).strip() if choice == "custom" else choice
+    """A checked item's quantity: the typed number field. Raises ValueError
+    for anything that isn't a positive whole number -- the caller turns
+    that into a per-item skip, never a whole-batch failure."""
+    raw = str(form.get(f"qty_{item_id}", "")).strip()
     pieces = int(raw)
     if pieces <= 0:
         raise ValueError("pieces must be positive")

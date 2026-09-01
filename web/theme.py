@@ -181,37 +181,34 @@ tbody tr:hover td{background:var(--raised)}
   margin-top:2px;padding-top:11px}
 .sums .row.total span:first-child{color:var(--text)}
 
-/* The storefront's item grid. Still no cards -- the "no cards, no gradient,
-   no glow" rule in the header above stands: each item is separated from
-   the next by whitespace and a single hairline rule, the same border-bottom
-   the price-sheet tables already use, never a filled or bordered box. The
-   icon is Minecraft's own pixel art, so it is rendered unsmoothed
-   (`image-rendering:pixelated`) rather than blurred by browser scaling. */
+/* The storefront's item grid. Each item now sits in its own boxed card --
+   a raised background plus a hairline border -- so a busy grid of 150+
+   items stays easy to tell apart at a glance. The icon is Minecraft's own
+   pixel art, so it is rendered unsmoothed (`image-rendering:pixelated`)
+   rather than blurred by browser scaling. */
 .itemgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));
-  gap:26px 20px;margin:16px 0 34px}
+  gap:16px;margin:16px 0 34px}
 .item{display:flex;flex-direction:column;align-items:flex-start;gap:5px;
-  padding-bottom:16px;border-bottom:1px solid var(--line)}
+  padding:14px;background:var(--raised);border:1px solid var(--line);
+  border-radius:8px}
 .icon{width:40px;height:40px;image-rendering:pixelated;margin-bottom:4px}
 .icon-fallback{display:flex;align-items:center;justify-content:center;
-  background:var(--raised);color:var(--accent-deep);font-weight:900;font-size:17px}
+  background:var(--ground-deep);color:var(--accent-deep);font-weight:900;font-size:17px}
 .item-name{font-size:15px;font-weight:700;color:var(--text);line-height:1.3}
 .item-price{font-size:15px;color:var(--accent);font-variant-numeric:tabular-nums}
 .item-stock{font-size:13px}
 
-/* One cart-controls block per item: a checkbox plus a plain radio group
-   for quantity (a stack / 4 stacks / 16 stacks / a typed custom amount).
-   No JavaScript on this site, so this is the whole quantity picker -- no
-   boxed input, no chip-look buttons, just underlined figures like every
-   other number on this page. */
+/* One cart-controls block per item: a checkbox plus a single typed
+   quantity field. No JavaScript on this site, so this is the whole
+   quantity picker -- a plain number input, no preset pills. */
 .cart-controls{display:flex;flex-direction:column;gap:6px;margin-top:5px;width:100%}
 .cart-check{font-size:13px;display:flex;align-items:center;gap:6px}
-.qty-pills{display:flex;flex-wrap:wrap;gap:2px 12px;font-size:13px;
+.qty-field{display:flex;align-items:center;gap:6px;font-size:13px;
   font-variant-numeric:tabular-nums}
-.qty-pills label{display:flex;align-items:center;gap:4px}
-.qty-custom input[type=number]{width:56px;background:transparent;border:none;
-  border-bottom:1px solid var(--line);color:var(--text);font-size:13px;
-  font-variant-numeric:tabular-nums;padding:1px 0;margin-left:2px}
-.qty-custom input[type=number]:focus{outline:none;border-bottom-color:var(--accent)}
+.qty-field input[type=number]{width:72px;background:var(--ground-deep);
+  border:1px solid var(--line);border-radius:4px;color:var(--text);
+  font-size:13px;font-variant-numeric:tabular-nums;padding:3px 6px}
+.qty-field input[type=number]:focus{outline:none;border-color:var(--accent)}
 .order-link{font-size:13px}
 
 /* The page-level submit for every checked item at once -- appears above and

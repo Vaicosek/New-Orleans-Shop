@@ -10,7 +10,7 @@ batch/cart form:
   [2] an anonymous visitor gets a "sign in" link, never a live-looking
       form it cannot submit
   [3] a signed-in customer can check off several items at once, each with
-      its own quantity pill (including "Custom"), and one POST opens a
+      its own typed quantity field, and one POST opens a
       real order for every checked item -- `core.orders.create_order`,
       same as Discord's shop panel -- with the right price snapshot and
       creator subject
@@ -113,23 +113,22 @@ async def main() -> None:
         check("each item carries its own checkbox",
               f'name="items" value="{oak_id}"' in text
               and f'name="items" value="{birch_id}"' in text)
-        check("each item carries a quantity radio group with a Custom option",
-              f'name="qty_{oak_id}"' in text and f'name="qty_custom_{oak_id}"' in text)
+        check("each item carries its own typed quantity field",
+              f'name="qty_{oak_id}"' in text and f'name="qty_{birch_id}"' in text)
         check("the page carries a single cart-submit form with a real csrf token",
               'class="cart-submit"' in text and 'name="csrf" value="test-csrf-token-abc123"' in text)
 
         real_csrf = "test-csrf-token-abc123"
 
         # Two items in one batch: Oak Log at its default stack, Birch Log
-        # via the "Custom" pill with a typed amount.
+        # with a typed custom amount.
         r = await client.post(
             "/order",
             data={
                 "csrf": real_csrf,
                 "items": [str(oak_id), str(birch_id)],
                 f"qty_{oak_id}": "64",
-                f"qty_{birch_id}": "custom",
-                f"qty_custom_{birch_id}": "200",
+                f"qty_{birch_id}": "200",
             },
             allow_redirects=False,
         )
@@ -149,7 +148,7 @@ async def main() -> None:
         by_item = {row["item_id"]: row for row in rows}
         check("the Oak Log order requests the default stack quantity",
               by_item[oak_id]["requested_pieces"] == 64)
-        check("the Birch Log order requests the typed custom quantity",
+        check("the Birch Log order requests the typed quantity",
               by_item[birch_id]["requested_pieces"] == 200)
         check("both orders are attributed to the signed-in customer, not a guessed subject",
               all(row["created_by"] == "u:1" for row in rows))
@@ -191,19 +190,18 @@ async def main() -> None:
         check("a batch where every item fails is refused outright", r.status == 400)
         check("a fully-failed batch opens no order", order_count() == 1)
 
-        # A checked item with a non-positive custom amount is skipped, not fatal.
+        # A checked item with a non-positive typed amount is skipped, not fatal.
         r = await client.post(
             "/order",
             data={
                 "csrf": real_csrf,
                 "items": str(oak_id),
-                f"qty_{oak_id}": "custom",
-                f"qty_custom_{oak_id}": "0",
+                f"qty_{oak_id}": "0",
             },
         )
-        check("a checked item with a zero custom quantity is refused (nothing else to open)",
+        check("a checked item with a zero quantity is refused (nothing else to open)",
               r.status == 400)
-        check("a non-positive custom quantity opens no order", order_count() == 1)
+        check("a non-positive quantity opens no order", order_count() == 1)
 
         # -- [5] every attack the route can see is refused, no order opens --
         before = order_count()
