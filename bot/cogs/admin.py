@@ -1,6 +1,6 @@
 """`/admin` -- the only admin-facing slash command, plus the background
 loops: the restock-alert scan that posts to `ALERTS_CHANNEL_ID`, the
-six-hourly pull of the reference market (CONTRACT.md section 13), and the
+six-hourly pull of the reference market (CONTRACT.md section 14), and the
 one-minute auction sweep that closes and settles any lot whose `closes_at`
 has passed.
 
@@ -19,7 +19,7 @@ from discord.ext import commands, tasks
 
 from core import alerts, auctions, refmarket
 
-from .. import layout
+from .. import layout, loyalty_sync
 from ..permissions import is_staff
 from ..views.admin import AdminPanelView, build_admin_embed
 from ..views.alerts import AlertAckView, build_alert_embed
@@ -160,6 +160,20 @@ class AdminCog(commands.Cog):
             return
         for auction_id in settled_ids:
             await self._refresh_auction_card(auction_id)
+            await self._sync_winner_rank(auction_id)
+
+    async def _sync_winner_rank(self, auction_id: int) -> None:
+        """A settled auction's winner just spent real coins -- that may have
+        crossed a loyalty threshold. Best-effort, same as the card refresh
+        beside it: a stale rank role is cosmetic, never worth raising over."""
+        from .. import queries
+        config = getattr(self.bot, "nola_config", None)
+        if config is None:
+            return
+        auction = queries.get_auction_detail(auction_id)
+        if auction is None or not auction.get("winner"):
+            return
+        await loyalty_sync.sync_rank_role(self.bot, config.guild_id, auction["winner"])
 
     async def _refresh_auction_card(self, auction_id: int) -> None:
         """Edit the public card in place so bidders see the result without

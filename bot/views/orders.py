@@ -28,7 +28,7 @@ import discord
 from core import money, orders as orders_core
 from core.pricing import price_label
 
-from .. import addressing, queries
+from .. import addressing, loyalty_sync, queries
 from ..permissions import is_staff
 from ..ui.embed import SEP, money_text, panel_embed, rows
 
@@ -367,6 +367,13 @@ class _ApproveGate(discord.ui.View):
             f"across {result['paid_claims']} claim(s).",
             ephemeral=True,
         )
+        # Every worker actually paid may have crossed a loyalty threshold --
+        # sync each one's rank role now, best-effort (loyalty_sync never
+        # raises). A stale role is cosmetic; a failed payout is not, so this
+        # runs strictly after the payout above already succeeded.
+        if interaction.guild_id is not None:
+            paid_workers = queries.list_paid_workers(self.order_id)
+            await loyalty_sync.sync_rank_roles(interaction.client, interaction.guild_id, paid_workers)
         # Prefer the card's own stored reference over wherever this gate was
         # opened from: the approve-queue picker in `/orders` carries no origin
         # at all, so keying on the origin alone left a paid, fulfilled order

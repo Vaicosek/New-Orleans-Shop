@@ -180,6 +180,7 @@ class FakeInteraction:
             fetch_channel=_unavailable,
         )
         self.channel_id = CARD_CHANNEL
+        self.guild_id = None  # no guild modelled here -- loyalty role sync is skipped
         self.id = 999
 
 

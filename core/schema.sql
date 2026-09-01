@@ -29,6 +29,18 @@ CREATE TABLE IF NOT EXISTS wallet_flags (
     PRIMARY KEY (subject, flag)
 );
 
+-- A staff-forced loyalty rank, overriding the computed score outright --
+-- same shape as wallet_flags: one row per subject, last write wins. Cleared
+-- by deleting the row, which reverts the subject to their computed rank.
+-- rank_key values are core/loyalty.py's TIERS keys; kept in sync by hand
+-- since SQLite CHECK constraints can't reference a Python table.
+CREATE TABLE IF NOT EXISTS loyalty_overrides (
+    subject  TEXT PRIMARY KEY REFERENCES wallets(subject) ON DELETE CASCADE,
+    rank_key TEXT NOT NULL CHECK (rank_key IN ('recruit', 'worker', 'veteran', 'expert', 'elite')),
+    set_by   TEXT NOT NULL,
+    set_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- Append-only. Never UPDATEd, never DELETEd. `reason` is NOT NULL and
 -- non-empty because an unreasoned entry is an unauditable one.
 CREATE TABLE IF NOT EXISTS ledger_entries (

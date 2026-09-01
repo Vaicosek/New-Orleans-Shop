@@ -50,6 +50,19 @@ DESIRED: tuple[Desired, ...] = (
     Desired("role:staff", "role", "Staff"),
     Desired("role:manager", "role", "Manager"),
 
+    # One role per loyalty rank (core/loyalty.py's TIERS, same order/keys).
+    # Auto-assigned and swapped by the bot as a subject's rank changes --
+    # nobody picks these by hand, so they carry no permissions of their
+    # own, same as a name tag. "Recruit" is everyone's rank until they earn
+    # the next rung, so it still gets a role: a member with NO rank role at
+    # all reads as "never synced", not "lowest rank", and that ambiguity is
+    # worth avoiding.
+    Desired("role:rank:recruit", "role", "Recruit"),
+    Desired("role:rank:worker", "role", "Worker"),
+    Desired("role:rank:veteran", "role", "Veteran"),
+    Desired("role:rank:expert", "role", "Expert"),
+    Desired("role:rank:elite", "role", "Elite"),
+
     Desired("category:market", "category", "New Orleans"),
     Desired("channel:welcome", "channel", "welcome", parent="category:market",
             topic="What New Orleans is, and how to buy."),

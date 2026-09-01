@@ -12,6 +12,7 @@ from __future__ import annotations
 from aiohttp import web
 
 from core.db import connection
+from core.loyalty import summary as loyalty_summary
 from core.money import balance, public_history
 from core.pricing import money_text, price_label
 
@@ -191,6 +192,7 @@ async def me(request: web.Request) -> web.Response:
         return page("Hub", "account", body, status=401)
 
     bal = balance(identity.subject)
+    loy = loyalty_summary(identity.subject)
     claims = _my_claims(identity.subject)
     entries = _visible_history(identity.subject, limit=30)
 
@@ -243,6 +245,13 @@ async def me(request: web.Request) -> web.Response:
   <div class="row"><span>Available to spend</span><span>{money_text(bal.available)}</span></div>
   <div class="row"><span>Held</span><span>{money_text(bal.held)}</span></div>
   <div class="row total"><span>Balance</span><span>{money_text(bal.coins)}</span></div>
+</div>
+
+<h2>Your rank</h2>
+<div class="sums">
+  <div class="row"><span>Rank</span><span>{esc(loy["tier"]["name"])}{" (set by staff)" if loy["overridden"] else ""}</span></div>
+  <div class="row"><span>Order bonus</span><span>+{loy["payout_bonus_pct"]}% extra on completed orders</span></div>
+  {f'<div class="row"><span>Next rank</span><span>{esc(loy["next_tier"]["name"])} in {loy["next_tier"]["points_needed"]:,} points</span></div>' if loy["next_tier"] else ''}
 </div>
 
 <h2>Your orders</h2>

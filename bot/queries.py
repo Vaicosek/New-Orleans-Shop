@@ -179,3 +179,16 @@ def list_open_auctions(*, include_closed: bool = True, limit: int = 25) -> list[
             (*statuses, limit),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def list_paid_workers(order_id: int) -> list[str]:
+    """Every distinct worker actually paid for `order_id` -- read after
+    `orders.approve()` so the bot layer can sync each one's loyalty rank
+    role without `core.orders` needing to know Discord exists."""
+    with db_in() as c:
+        rows = c.execute(
+            "SELECT DISTINCT worker FROM order_claims "
+            "WHERE order_id = ? AND paid_event IS NOT NULL",
+            (order_id,),
+        ).fetchall()
+    return [r["worker"] for r in rows]

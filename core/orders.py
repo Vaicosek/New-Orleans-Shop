@@ -27,7 +27,7 @@ from __future__ import annotations
 import sqlite3
 from typing import Any, Optional
 
-from . import audit, money
+from . import audit, loyalty, money
 from .db import db_in
 from .money import normalise_subject
 from .pricing import CURRENCY, split_charge
@@ -571,26 +571,42 @@ def approve(order_id: int, approver: str, *,
         for cl, amount in zip(claims, payouts):
             if amount <= 0:
                 continue                                      # nothing to pay for -- not an error
+            worker = normalise_subject(cl["worker"])
+
+            # Loyalty payout bonus, read off the worker's CURRENT tier --
+            # this order's own payout does not retroactively rank them up
+            # before pricing itself. Added on top of the priced amount,
+            # never in place of it, and stored into paid_coins as the
+            # TOTAL actually paid: paid_coins is what core/loyalty.py sums
+            # to compute future points, and a bonus the worker was really
+            # paid has to count toward their own rank the same as the base
+            # amount does.
+            bonus_pct = loyalty.payout_bonus_pct(worker, conn=c)
+            bonus = (amount * bonus_pct) // 100
+            total_amount = amount + bonus
+
             event_id = money.new_event_id("payout")
             won = c.execute(
                 "UPDATE order_claims SET paid_event = :evt, paid_coins = :amt "
                 " WHERE id = :cid AND paid_event IS NULL",
-                {"evt": event_id, "amt": amount, "cid": cl["id"]},
+                {"evt": event_id, "amt": total_amount, "cid": cl["id"]},
             )
             if won.rowcount != 1:
                 continue                                       # a prior approve already paid this
-            worker = normalise_subject(cl["worker"])
             money.transfer(
-                "treasury:shop", worker, amount,
-                service="shop", reason=f"order #{order_id} payout",
+                "treasury:shop", worker, total_amount,
+                service="shop", reason=(
+                    f"order #{order_id} payout"
+                    + (f" (includes {bonus:,} loyalty bonus at {bonus_pct}%)" if bonus else "")
+                ),
                 ref_kind="order", ref_id=str(order_id), idem_key=event_id, conn=c,
             )
-            paid_total += amount
+            paid_total += total_amount
             paid_claims += 1
             ops.append({
-                "op": "transfer", "src": "treasury:shop", "dst": worker, "amount": amount,
+                "op": "transfer", "src": "treasury:shop", "dst": worker, "amount": total_amount,
                 "reverse": {"op": "transfer", "src": worker, "dst": "treasury:shop",
-                            "amount": amount},
+                            "amount": total_amount},
             })
 
         c.execute(

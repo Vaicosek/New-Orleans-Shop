@@ -14,6 +14,7 @@ from aiohttp import web
 from core import refmarket
 from core.catalog import categories_with_items
 from core.db import connection
+from core.loyalty import effective_tier
 from core import pricing
 from core.pricing import money_text, price_label
 
@@ -135,7 +136,8 @@ async def ledger(request: web.Request) -> web.Response:
 
     wallet_rows = [
         f'<tr><td>{esc(w["subject"])}</td><td class="num">{money_text(w["coins"])}</td>'
-        f'<td>{"yes" if w["frozen"] else "no"}</td></tr>'
+        f'<td>{"yes" if w["frozen"] else "no"}</td>'
+        f'<td>{esc(effective_tier(w["subject"])["name"])}</td></tr>'
         for w in _wallets()
     ]
     order_rows = [
@@ -194,7 +196,7 @@ async def ledger(request: web.Request) -> web.Response:
 <p>Every declared category, including planned ones with nothing stocked yet.</p>
 {catalog_table}
 <h2>Balances</h2>
-{_table(["Subject", "Balance", "Frozen"], {1}, wallet_rows, "No wallets yet.")}
+{_table(["Subject", "Balance", "Frozen", "Rank"], {1}, wallet_rows, "No wallets yet.")}
 <h2>Open orders</h2>
 {_table(["Order", "Item", "Requested", "Produced", "Status", "Price"], {2, 3, 5},
         order_rows, "No open orders.")}

@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 
 import discord
 
-from core import money
+from core import loyalty, money
 
 from .. import queries
 from .pickers import UserPickerView
@@ -26,12 +26,24 @@ from ..ui.embed import SEP, money_text, panel_embed, rows
 
 def build_wallet_embed(subject: str) -> discord.Embed:
     bal = money.balance(subject)
-    body = (
-        f"Balance: {money_text(bal.coins)}\n"
-        f"Held: {money_text(bal.held)}\n"
-        f"Available: {money_text(bal.available)}"
-    )
-    return panel_embed("Your wallet", body)
+    loy = loyalty.summary(subject)
+    lines = [
+        f"Balance: {money_text(bal.coins)}",
+        f"Held: {money_text(bal.held)}",
+        f"Available: {money_text(bal.available)}",
+        "",
+        f"Rank: **{loy['tier']['name']}**" + (" (set by staff)" if loy["overridden"] else ""),
+    ]
+    if loy["payout_bonus_pct"] or loy["bet_bonus_pct"]:
+        lines.append(
+            f"+{loy['payout_bonus_pct']}% on order payouts, "
+            f"+{loy['bet_bonus_pct']}% higher casino bet limits"
+        )
+    if loy["next_tier"] is not None:
+        lines.append(
+            f"{loy['next_tier']['points_needed']:,} points to {loy['next_tier']['name']}"
+        )
+    return panel_embed("Your wallet", rows(lines))
 
 
 def _unix(ts: str) -> int:

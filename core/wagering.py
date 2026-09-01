@@ -36,6 +36,8 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timezone
 
+from . import loyalty
+
 MAX_BET = 5_000
 MAX_DAILY_LOSS = 20_000
 MIN_ACCOUNT_AGE_DAYS = 3
@@ -121,8 +123,19 @@ def check_wager(conn: sqlite3.Connection, subject: str, amount: int, *,
             f"{subject}'s wallet is younger than MIN_ACCOUNT_AGE_DAYS={MIN_ACCOUNT_AGE_DAYS}"
         )
 
-    if amount > MAX_BET:
-        raise BetTooLarge(f"{amount:,} exceeds MAX_BET {MAX_BET:,}")
+    # A loyalty rank raises these caps, never lowers them -- read off the
+    # subject's CURRENT tier, in the SAME transaction as the exposure check
+    # below, so the bonus can never be read stale against a hold that is
+    # about to change it.
+    bonus_pct = loyalty.bet_bonus_pct(subject, conn=conn)
+    effective_max_bet = MAX_BET + (MAX_BET * bonus_pct) // 100
+    effective_max_daily_loss = MAX_DAILY_LOSS + (MAX_DAILY_LOSS * bonus_pct) // 100
+
+    if amount > effective_max_bet:
+        raise BetTooLarge(
+            f"{amount:,} exceeds this subject's MAX_BET of {effective_max_bet:,} "
+            f"(base {MAX_BET:,}{f', +{bonus_pct}% loyalty bonus' if bonus_pct else ''})"
+        )
 
     day = today()
     loss_row = conn.execute(
@@ -137,12 +150,14 @@ def check_wager(conn: sqlite3.Connection, subject: str, amount: int, *,
     open_exposure = int(exposure_row["exposure"])
 
     at_risk = lost_so_far + open_exposure + amount
-    if at_risk > MAX_DAILY_LOSS:
+    if at_risk > effective_max_daily_loss:
         raise DailyLossExceeded(
             f"{subject} would have {at_risk:,} at risk today ({lost_so_far:,} "
             f"already realized + {open_exposure:,} across all open wager "
             f"positions, casino and predictions together + {amount:,} this "
-            f"{kind} wager); MAX_DAILY_LOSS is {MAX_DAILY_LOSS:,} and it is "
+            f"{kind} wager); this subject's MAX_DAILY_LOSS is "
+            f"{effective_max_daily_loss:,} (base {MAX_DAILY_LOSS:,}"
+            f"{f', +{bonus_pct}% loyalty bonus' if bonus_pct else ''}) and it is "
             f"one wallet-wide cap, not one per wager kind"
         )
 

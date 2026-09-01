@@ -1,6 +1,6 @@
 """New Orleans web -- aiohttp, plain f-string templating, no Jinja.
 
-Three audiences, one shell (see CONTRACT.md section 11):
+Three audiences, one shell (see CONTRACT.md section 12):
   storefront/inventory  public, no session, must answer when the bot is down
   account           customer, Discord OAuth2
   ledger            staff only

@@ -317,7 +317,63 @@ public card in the auctions channel -- a Bid button, an amount modal, and a conf
 mirroring `bot/views/orders.py`'s order card pattern down to resolving the auction id from the
 message's own embed footer rather than trusting `self`.
 
-## 11. Website
+## 11. Loyalty ranks
+
+**Adapted from AbexTech's `abex_tiers.py`, not copied.** AbexTech blends two
+halves into one score -- points earned, plus a wallet balance counted at a
+capped rate -- against a five-rung ladder (Recruit, Worker, Veteran, Expert,
+Elite), and pays out a purchase discount on top. New Orleans keeps the
+blended-score shape and the ladder names/thresholds (already-tuned numbers
+from a live economy of the same kind), but there is no customer-pays-for-
+items flow here to discount: orders pay *workers* out of `treasury:shop`,
+they are not a customer buying something. So what counts, and what a rank
+changes, had to be re-derived for this shop specifically:
+
+**Points, computed live, never cached** (`core/loyalty.py`): coins actually
+paid to a worker for a fulfilled order-claim, plus coins actually spent
+winning an auction lot, both divided by `POINTS_DIVISOR`. A wallet's held
+balance counts too, at a capped rate that can at most DOUBLE what was
+earned -- park a fortune and produce nothing, and rank stays Recruit,
+because half of nothing is nothing. Same discipline as `core/wagering.py`'s
+exposure query: re-derived from `order_claims`/`auction_bids` on every
+read, never a running counter that can drift from what actually happened.
+
+**What a rank actually changes**, each wired at the exact point the money
+moves, never trusted from a stale read:
+  - `payout_bonus_pct` -- added on top of the priced amount at
+    `orders.approve()` time (ported from AbexTech's own "work" domain
+    benefit). The bonus itself is real money paid from `treasury:shop`, and
+    `order_claims.paid_coins` records the TOTAL actually paid -- a bonus a
+    worker was really paid counts toward their OWN future points same as
+    the base amount does.
+  - `bet_bonus_pct` -- raises the effective MAX_BET/MAX_DAILY_LOSS a
+    subject gets in `core/wagering.py`, read in the SAME transaction as the
+    exposure check. This stands in for AbexTech's purchase discount, which
+    has nothing to attach to in this economy. A Recruit (0% bonus, true of
+    every fresh wallet) sees the bare base constants, unchanged.
+
+**A staff override wins outright over the computed score** (`/admin` ->
+Set rank / Clear rank override, owner-only -- the same class of privilege
+as Fund treasury, since a forced rank grants real payout and betting-cap
+benefits). One row in `loyalty_overrides`, same shape as a wallet flag:
+last write wins, cleared by deleting it.
+
+**Discord role auto-sync, never a staff click.** `/setup` builds one role
+per rank (`role:rank:<key>`, section 7's channel/role provisioning). The
+bot moves a subject's role to match their current tier right after the
+moment their score could have changed: an order payout, an auction
+settlement, or a staff override -- `bot/loyalty_sync.py`, best-effort and
+never allowed to fail the money move beside it.
+
+**The website shows the rank and the order-side bonus only -- never the
+betting-cap one.** Section 9's wall (`tests/test_no_wagering_on_web.py`'s
+word scan: "bet", "payout" and the rest, banned as whole words anywhere
+under `web/`) is not just a vocabulary rule; the site must never let on
+that a casino exists at all. `/me` shows a player's own rank and order
+bonus; `/ledger` shows every wallet's rank to staff. Neither ever mentions
+the betting-cap benefit -- that one is Discord-only, shown in `/wallet`.
+
+## 12. Website
 
 **Domain: `neworleansshop.org`** (registered 31 Aug 2026). The `.com` is held by a
 parking service and was never an operating business; the name itself is not a
@@ -376,7 +432,7 @@ glow, gradients, Inter/Geist/Space Grotesk, monospace-for-vibe, CAPS eyebrow lab
 stat-card hero rows, three-card rows, bento grids, `~` approximated dates, subtitle sentences
 under headings, scroll fade-ins.
 
-## 12. Deploy
+## 13. Deploy
 
 Wispbyte panel. One startup command, no shell.
 
@@ -398,7 +454,7 @@ over the table when set. `DISCORD_TOKEN`, `GUILD_ID`, `NOLA_GAME_SEED_SECRET` an
 `.env` keys are documented in `docs/deploy.md` by NAME only. No token, webhook, secret or
 access-granting id is ever written into this repo or the brain.
 
-## 13. Reference market — read-only, and it stays that way
+## 14. Reference market — read-only, and it stays that way
 
 New Orleans mirrors one other server's public market so the owner can see what an item
 fetches somewhere with real volume before he sets a price here. Source: DiplomaticaMC's
@@ -458,7 +514,7 @@ view, health line) is built and tested against a real captured payload and will 
 moment a request gets through; the boot block's `reference market:` line reading
 `last success` is the only thing that counts as verification.
 
-## 14. Open — John decides
+## 15. Open — John decides
 
 1. ~~**Currency name.**~~ Decided and DONE: gold ingots, symbol `g`, whole numbers (S2, S5). The leftover `core.config.currency_name`/`CURRENCY_NAME` setting has been **removed** -- it is gone from `core/config.py` and no code reads it. Nothing is left for the integrator to retire here; the only surviving mention is a historical note in a `bot/ui/embed.py` docstring recording that an earlier version took the argument.
 2. ~~**Casino games beyond coinflip and dice.**~~ Decided and DONE: slots shipped (commit-reveal per-reel draws via `_uniform_int_positioned`, RTP 91.975%, edge 8.025%). Blackjack and roulette remain undecided -- real work, worth it only if people will actually play them.

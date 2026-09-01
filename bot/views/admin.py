@@ -12,9 +12,9 @@ import secrets
 
 import discord
 
-from core import alerts, audit, auctions as auctions_core, catalog, db, money, predictions, pricing
+from core import alerts, audit, auctions as auctions_core, catalog, db, loyalty, money, predictions, pricing
 
-from .. import addressing
+from .. import addressing, loyalty_sync
 
 from . import auctions as auction_views
 from . import pickers
@@ -871,6 +871,85 @@ class AdminPanelView(_StaffGatedView):
         await interaction.response.send_message(
             "Which treasury?",
             view=pickers.OptionPickerView(self.owner_id, options, picked),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Set rank", style=discord.ButtonStyle.secondary, row=3)
+    async def set_rank(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        """Owner-only, like Fund treasury -- a forced rank grants real
+        benefits (order payout bonus, a raised MAX_BET/MAX_DAILY_LOSS), so
+        this is the same class of privilege as minting coins, not an
+        ordinary staff action."""
+        config = getattr(interaction.client, "nola_config", None)
+        if config is None or not permissions.is_owner(interaction.user, config):
+            await interaction.response.send_message("Owners only.", ephemeral=True)
+            return
+
+        async def picked_member(inter: discord.Interaction, member: discord.abc.User) -> None:
+            options = [(t["name"], t["key"]) for t in loyalty.TIERS]
+
+            async def picked_rank(inter2: discord.Interaction, rank_key: str) -> None:
+                await inter2.response.defer(ephemeral=True)
+                subject = money.user(member.id)
+                actor = money.user(interaction.user.id)
+                with db.db() as conn:
+                    loyalty.set_override(subject, rank_key, actor=actor, conn=conn)
+                    audit.record(
+                        conn, actor=actor, target=subject, kind="loyalty.set_rank",
+                        summary=f"forced {subject} to rank {rank_key} via /admin",
+                        ops=[{"op": "set_rank", "subject": subject, "rank_key": rank_key,
+                              "reverse": "clear_rank"}],
+                    )
+                if inter2.guild_id is not None:
+                    await loyalty_sync.sync_rank_role(inter2.client, inter2.guild_id, subject)
+                await inter2.followup.send(
+                    f"{member.display_name} is now forced to **{loyalty.TIERS_BY_KEY[rank_key]['name']}** "
+                    "until cleared.", ephemeral=True)
+
+            await inter.response.send_message(
+                f"Which rank for {member.display_name}?",
+                view=pickers.OptionPickerView(self.owner_id, options, picked_rank),
+                ephemeral=True,
+            )
+
+        await interaction.response.send_message(
+            "Pick a member to set a forced rank for:",
+            view=pickers.UserPickerView(self.owner_id, picked_member),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Clear rank override", style=discord.ButtonStyle.secondary, row=3)
+    async def clear_rank(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        """Owner-only, same gate as Set rank -- reverts a subject to their
+        computed rank."""
+        config = getattr(interaction.client, "nola_config", None)
+        if config is None or not permissions.is_owner(interaction.user, config):
+            await interaction.response.send_message("Owners only.", ephemeral=True)
+            return
+
+        async def picked(inter: discord.Interaction, member: discord.abc.User) -> None:
+            await inter.response.defer(ephemeral=True)
+            subject = money.user(member.id)
+            actor = money.user(interaction.user.id)
+            with db.db() as conn:
+                cleared = loyalty.clear_override(subject, conn=conn)
+                if cleared:
+                    audit.record(
+                        conn, actor=actor, target=subject, kind="loyalty.clear_rank",
+                        summary=f"cleared {subject}'s forced rank via /admin",
+                        ops=[{"op": "clear_rank", "subject": subject, "reverse": None}],
+                    )
+            if cleared and inter.guild_id is not None:
+                await loyalty_sync.sync_rank_role(inter.client, inter.guild_id, subject)
+            await inter.followup.send(
+                f"{member.display_name} reverted to their computed rank."
+                if cleared else f"{member.display_name} had no forced rank.",
+                ephemeral=True,
+            )
+
+        await interaction.response.send_message(
+            "Pick a member to clear a forced rank for:",
+            view=pickers.UserPickerView(self.owner_id, picked),
             ephemeral=True,
         )
 
