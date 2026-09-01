@@ -46,6 +46,7 @@ COGS = (
     "bot.cogs.predict",
     "bot.cogs.admin",
     "bot.cogs.go",
+    "bot.cogs.team",
 )
 
 # Persistent views: registered once at boot with placeholder state. Every

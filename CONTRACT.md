@@ -198,6 +198,7 @@ One slash command per domain. Everything else is a panel.
 | `/admin` | Admin panel | items, prices, thresholds, resolve markets, treasury |
 | `/setup` | Setup preview | builds the server's channels and roles, once, at install |
 | `/go <code>` | direct jump | 4-char address to any entity |
+| `/team` | Team panel | run a team (roster, add/remove, rename, disband), or join/leave one |
 
 `/setup` is the one command that is not a domain panel, and it is separate rather than a
 button inside `/admin` for a functional reason, not a cosmetic one: `/admin` is gated on
@@ -405,6 +406,31 @@ combines `write_off` with freezing the wallet or setting `orders_blocked`.
 **Self-serve, not staff-approved.** Unlike bonds and land (staff lists, players act), a loan
 needs no staff step at all: the flat credit limit itself is the safety control. `/wallet`
 carries Borrow and Repay buttons beside the existing Transfer button.
+
+## 11d. Teams
+
+**Roster and naming only -- adapted from AbexTech's `cogs/team.py` /
+`views/team_settings.py`, not copied.** AbexTech's teams exist to link a worker's
+in-game name to CSN/chest-shop sales tracking and to pay the manager an override
+commission on the worker's order payouts. Neither has anything to attach to here: no
+external sales feed to key an IGN off, and no per-order cut wired into
+`orders.approve()`. What's left, deliberately, is just the roster: a manager names a
+team and runs its membership; a worker joins or leaves one. This was a scope call, not a
+technical gap -- see HANDOFF.md.
+
+**One team per manager, one team per member at a time.** `teams.manager` is UNIQUE (a
+manager renames rather than duplicates), `team_members.subject` is UNIQUE (joining a new
+team silently leaves whichever one you were already on -- `INSERT OR REPLACE`, same
+last-write-wins shape as `loyalty_overrides`). A manager can't join their own team as a
+member.
+
+**No money moves, so no `money.guarded`.** Unlike every other domain module in this
+shop, `core/teams.py` never opens an idempotency-guarded transaction -- a join, leave,
+rename or roster edit is a plain row write with nothing to replay into a double charge.
+
+**Gated by `is_manager`, not a new role.** Creating a team uses the same
+`role:manager`/`STAFF_ROLE_IDS` check `/admin` already runs -- no new provisioned role,
+no `/setup` changes. Joining and leaving are open to anyone.
 
 ## 11. Loyalty ranks
 

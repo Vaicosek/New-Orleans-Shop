@@ -41,6 +41,26 @@ CREATE TABLE IF NOT EXISTS loyalty_overrides (
     set_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- A manager's roster. One team per manager (a second team is a rename, not
+-- a second row) and one team per member at a time -- joining a new team
+-- silently leaves whichever one you were already on, same "last write
+-- wins" shape as loyalty_overrides just above. No money, no commission, no
+-- IGN linking: see CONTRACT.md section 11d for what was deliberately left
+-- out of AbexTech's version this was adapted from.
+CREATE TABLE IF NOT EXISTS teams (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    manager    TEXT    NOT NULL UNIQUE REFERENCES wallets(subject) ON DELETE CASCADE,
+    name       TEXT    NOT NULL,
+    created_at TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS team_members (
+    team_id   INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+    subject   TEXT    NOT NULL UNIQUE REFERENCES wallets(subject) ON DELETE CASCADE,
+    joined_at TEXT    NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (team_id, subject)
+);
+
 -- Append-only. Never UPDATEd, never DELETEd. `reason` is NOT NULL and
 -- non-empty because an unreasoned entry is an unauditable one.
 CREATE TABLE IF NOT EXISTS ledger_entries (
