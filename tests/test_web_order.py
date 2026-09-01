@@ -2,18 +2,24 @@
 
 Same style as test_web.py -- real aiohttp TestClient against a temp SQLite
 DB, login bypassed through the `identity_provider` seam. This file exists
-to pin the things CONTRACT.md section 12's new paragraph promises:
+to pin the things CONTRACT.md section 12's new paragraph promises for the
+batch/cart form:
 
   [1] the grid renders an icon (a real mapped item gets an <img>, an
       unmapped one gets a monogram tile, never a broken image request)
   [2] an anonymous visitor gets a "sign in" link, never a live-looking
       form it cannot submit
-  [3] a signed-in customer's form actually opens a real order --
-      `core.orders.create_order`, same as Discord's shop panel -- with the
-      right price snapshot and creator subject
-  [4] every one of the four ways this route can be attacked (no csrf, wrong
-      csrf, anonymous, tampered item id, non-positive pieces) is refused
-      and leaves no order behind
+  [3] a signed-in customer can check off several items at once, each with
+      its own quantity pill (including "Custom"), and one POST opens a
+      real order for every checked item -- `core.orders.create_order`,
+      same as Discord's shop panel -- with the right price snapshot and
+      creator subject
+  [4] one bad line in the batch (a stale item id, a non-positive custom
+      amount) never blocks the rest -- the redirect reports exactly how
+      many opened and how many were skipped
+  [5] every one of the ways this route can be attacked (no csrf, wrong
+      csrf, anonymous, no items checked at all) is refused and leaves no
+      order behind
 """
 from __future__ import annotations
 
@@ -67,6 +73,7 @@ async def main() -> None:
 
     reset()
     oak_id = catalog.add_item("Oak Log", 1, price_unit_pieces=64, stack_size=64)
+    birch_id = catalog.add_item("Birch Log", 1, price_unit_pieces=64, stack_size=64)
     catalog.add_item("Unmapped Mystery Item", 5, price_unit_pieces=1, stack_size=1)
 
     app = create_app()
@@ -88,82 +95,128 @@ async def main() -> None:
               'class="icon icon-fallback"' in text and ">U<" in text)
 
         # -- [2] anonymous visitor: link, never a live-looking form --------
-        check("anonymous visitor sees a sign-in link, not an order form",
-              'class="order-link"' in text and 'class="order-form"' not in text)
+        check("anonymous visitor sees a sign-in link, never cart controls",
+              'class="order-link"' in text and 'class="cart-controls"' not in text)
 
-        r = await client.post("/order", data={"item_id": str(oak_id), "pieces": "64"})
+        r = await client.post("/order", data={"items": str(oak_id), f"qty_{oak_id}": "64"})
         check("POST /order 401s an anonymous visitor", r.status == 401)
         check("an anonymous POST opens no order", order_count() == 0)
 
-        # -- [3] signed-in customer: real form, real order ------------------
-        # A real session always carries a real random csrf (auth.create_session
-        # mints one) -- this fake Identity sets one explicitly so the test
-        # matches that reality instead of accidentally testing an empty-vs-
-        # empty csrf match that can never happen against a real session.
+        # -- [3] signed-in customer: real form, real batch order ------------
         identity_box["value"] = Identity(subject="u:1", discord_id="1",
                                           name="Regular Customer", staff=False,
                                           csrf="test-csrf-token-abc123")
         r = await client.get("/")
         text = await r.text()
-        check("signed-in visitor sees a real order form", 'class="order-form"' in text)
-        check("the form carries the item id", f'value="{oak_id}"' in text)
+        check("signed-in visitor sees cart controls, not a sign-in link",
+              'class="cart-controls"' in text and 'class="order-link"' not in text)
+        check("each item carries its own checkbox",
+              f'name="items" value="{oak_id}"' in text
+              and f'name="items" value="{birch_id}"' in text)
+        check("each item carries a quantity radio group with a Custom option",
+              f'name="qty_{oak_id}"' in text and f'name="qty_custom_{oak_id}"' in text)
+        check("the page carries a single cart-submit form with a real csrf token",
+              'class="cart-submit"' in text and 'name="csrf" value="test-csrf-token-abc123"' in text)
 
-        # Pull the real csrf token straight off the rendered form -- the
-        # same thing a real browser submitting the real page would do,
-        # rather than reaching into web_sessions directly.
-        import re
-        m = re.search(r'name="csrf" value="([^"]+)"', text)
-        check("the rendered form carries a csrf token", m is not None)
-        real_csrf = m.group(1) if m else ""
+        real_csrf = "test-csrf-token-abc123"
 
-        r = await client.post("/order", data={"item_id": str(oak_id), "pieces": "64",
-                                                "csrf": real_csrf},
-                               allow_redirects=False)
-        check("a correct-csrf order POST redirects back to the storefront",
+        # Two items in one batch: Oak Log at its default stack, Birch Log
+        # via the "Custom" pill with a typed amount.
+        r = await client.post(
+            "/order",
+            data={
+                "csrf": real_csrf,
+                "items": [str(oak_id), str(birch_id)],
+                f"qty_{oak_id}": "64",
+                f"qty_{birch_id}": "custom",
+                f"qty_custom_{birch_id}": "200",
+            },
+            allow_redirects=False,
+        )
+        check("a correct-csrf batch POST redirects back to the storefront",
               r.status in (302, 303))
-        check("the redirect carries the new order id",
-              "ordered=" in r.headers.get("Location", ""))
-        check("exactly one order now exists", order_count() == 1)
+        location = r.headers.get("Location", "")
+        check("the redirect carries both new order ids", "ordered=" in location
+              and "," in location.split("ordered=")[1].split("&")[0])
+        check("no failure count is reported when every item opened", "failed=" not in location)
+        check("exactly two orders now exist", order_count() == 2)
+
         with db.db() as c:
-            row = c.execute(
+            rows = c.execute(
                 "SELECT item_id, requested_pieces, created_by, price_coins, price_unit_pieces "
-                "FROM orders ORDER BY id DESC LIMIT 1"
-            ).fetchone()
-        check("the order is for the right item", row["item_id"] == oak_id)
-        check("the order requests the submitted quantity", row["requested_pieces"] == 64)
-        check("the order is attributed to the signed-in customer, not a guessed subject",
-              row["created_by"] == "u:1")
-        check("the order snapshots the item's current price basis",
-              row["price_coins"] == 1 and row["price_unit_pieces"] == 64)
+                "FROM orders ORDER BY id ASC"
+            ).fetchall()
+        by_item = {row["item_id"]: row for row in rows}
+        check("the Oak Log order requests the default stack quantity",
+              by_item[oak_id]["requested_pieces"] == 64)
+        check("the Birch Log order requests the typed custom quantity",
+              by_item[birch_id]["requested_pieces"] == 200)
+        check("both orders are attributed to the signed-in customer, not a guessed subject",
+              all(row["created_by"] == "u:1" for row in rows))
+        check("both orders snapshot their item's current price basis",
+              all(row["price_coins"] == 1 and row["price_unit_pieces"] == 64 for row in rows))
 
-        with db.db() as c:
-            new_id = c.execute("SELECT id FROM orders ORDER BY id DESC LIMIT 1").fetchone()["id"]
-        r = await client.get(f"/?ordered={new_id}")
+        r = await client.get(f"/{location[location.index('?'):]}" if "?" in location else "/")
         text = await r.text()
-        check("the storefront shows a plain-text confirmation notice, no banner box",
-              f"Order #{new_id} opened" in text and 'class="notice"' in text)
+        check("the storefront shows a plural, plain-text confirmation notice, no banner box",
+              "Orders #" in text and 'class="notice"' in text)
 
-        # -- [4] every attack the route can see is refused, no order opens --
+        # -- [4] partial failure: one good item, one stale item id ----------
+        reset()
+        oak_id = catalog.add_item("Oak Log", 1, price_unit_pieces=64, stack_size=64)
+
+        r = await client.post(
+            "/order",
+            data={
+                "csrf": real_csrf,
+                "items": [str(oak_id), "999999"],
+                f"qty_{oak_id}": "64",
+                "qty_999999": "64",
+            },
+            allow_redirects=False,
+        )
+        check("a batch with one good and one stale item id still redirects",
+              r.status in (302, 303))
+        location = r.headers.get("Location", "")
+        check("the redirect reports exactly one opened order", location.count("ordered=") == 1
+              and "," not in location.split("ordered=")[1].split("&")[0])
+        check("the redirect reports exactly one failure", "failed=1" in location)
+        check("exactly one order exists after the partial-failure batch", order_count() == 1)
+
+        # A batch where every line is bad opens nothing and 400s.
+        r = await client.post(
+            "/order",
+            data={"csrf": real_csrf, "items": "999999", "qty_999999": "64"},
+        )
+        check("a batch where every item fails is refused outright", r.status == 400)
+        check("a fully-failed batch opens no order", order_count() == 1)
+
+        # A checked item with a non-positive custom amount is skipped, not fatal.
+        r = await client.post(
+            "/order",
+            data={
+                "csrf": real_csrf,
+                "items": str(oak_id),
+                f"qty_{oak_id}": "custom",
+                f"qty_custom_{oak_id}": "0",
+            },
+        )
+        check("a checked item with a zero custom quantity is refused (nothing else to open)",
+              r.status == 400)
+        check("a non-positive custom quantity opens no order", order_count() == 1)
+
+        # -- [5] every attack the route can see is refused, no order opens --
         before = order_count()
 
-        r = await client.post("/order", data={"item_id": str(oak_id), "pieces": "10"})
+        r = await client.post("/order", data={"items": str(oak_id), f"qty_{oak_id}": "64"})
         check("a POST with no csrf field at all is refused", r.status == 403)
 
-        r = await client.post("/order", data={"item_id": str(oak_id), "pieces": "10",
+        r = await client.post("/order", data={"items": str(oak_id), f"qty_{oak_id}": "64",
                                                 "csrf": "not-the-real-token"})
         check("a POST with the wrong csrf is refused", r.status == 403)
 
-        r = await client.post("/order", data={"item_id": "999999", "pieces": "10",
-                                                "csrf": real_csrf})
-        check("a POST for a nonexistent item id is refused", r.status == 400)
-
-        r = await client.post("/order", data={"item_id": str(oak_id), "pieces": "0",
-                                                "csrf": real_csrf})
-        check("a POST requesting zero pieces is refused", r.status == 400)
-
-        r = await client.post("/order", data={"item_id": str(oak_id), "pieces": "-5",
-                                                "csrf": real_csrf})
-        check("a POST requesting negative pieces is refused", r.status == 400)
+        r = await client.post("/order", data={"csrf": real_csrf})
+        check("a POST with no items checked at all is refused", r.status == 400)
 
         check("none of the refused attempts opened an order",
               order_count() == before, f"before={before} after={order_count()}")
@@ -175,4 +228,4 @@ print()
 if FAILS:
     print(f"{len(FAILS)} FAILED: {', '.join(FAILS)}")
     sys.exit(1)
-print("all storefront-grid / order-route tests pass")
+print("all storefront-grid / order-route (batch) tests pass")

@@ -198,23 +198,38 @@ tbody tr:hover td{background:var(--raised)}
 .item-price{font-size:15px;color:var(--accent);font-variant-numeric:tabular-nums}
 .item-stock{font-size:13px}
 
-/* One form per item, plain underlined figures rather than a boxed input --
-   the same "figures, not chrome" register as everything else numeric on
-   this page. */
-.order-form{display:flex;gap:8px;align-items:center;margin-top:5px;width:100%}
-.order-form input[type=number]{width:60px;background:transparent;border:none;
-  border-bottom:1px solid var(--line);color:var(--text);font-size:15px;
-  font-variant-numeric:tabular-nums;padding:2px 0}
-.order-form input[type=number]:focus{outline:none;border-bottom-color:var(--accent)}
-.order-form button{background:var(--accent);color:var(--ground-deep);border:none;
-  font-weight:900;font-size:12px;letter-spacing:.1em;text-transform:uppercase;
-  padding:8px 14px;cursor:pointer;font-family:inherit}
-.order-form button:hover{background:var(--pop)}
+/* One cart-controls block per item: a checkbox plus a plain radio group
+   for quantity (a stack / 4 stacks / 16 stacks / a typed custom amount).
+   No JavaScript on this site, so this is the whole quantity picker -- no
+   boxed input, no chip-look buttons, just underlined figures like every
+   other number on this page. */
+.cart-controls{display:flex;flex-direction:column;gap:6px;margin-top:5px;width:100%}
+.cart-check{font-size:13px;display:flex;align-items:center;gap:6px}
+.qty-pills{display:flex;flex-wrap:wrap;gap:2px 12px;font-size:13px;
+  font-variant-numeric:tabular-nums}
+.qty-pills label{display:flex;align-items:center;gap:4px}
+.qty-custom input[type=number]{width:56px;background:transparent;border:none;
+  border-bottom:1px solid var(--line);color:var(--text);font-size:13px;
+  font-variant-numeric:tabular-nums;padding:1px 0;margin-left:2px}
+.qty-custom input[type=number]:focus{outline:none;border-bottom-color:var(--accent)}
 .order-link{font-size:13px}
 
-/* A one-line confirmation after opening an order -- plain text in the
-   ledger's own "gain" green, no banner box. */
+/* The page-level submit for every checked item at once -- appears above and
+   below the price sheet so a long grid never hides it off-screen. Same
+   accent-filled button register as everywhere else that commits an action. */
+.cart-submit{margin:14px 0;padding:14px 0;border-top:1px solid var(--line);
+  border-bottom:1px solid var(--line)}
+.cart-submit button{background:var(--accent);color:var(--ground-deep);border:none;
+  font-weight:900;font-size:12px;letter-spacing:.1em;text-transform:uppercase;
+  padding:10px 20px;cursor:pointer;font-family:inherit}
+.cart-submit button:hover{background:var(--pop)}
+
+/* A one-line confirmation after opening an order (or orders) -- plain text
+   in the ledger's own "gain" green, no banner box. A batch that partly
+   failed still reads as a win with a quiet parenthetical, never a loud
+   warning; a batch that fully failed uses the loss tone instead. */
 .notice{color:var(--gain);font-size:16px;margin:14px 0}
+.notice-loss{color:var(--loss)}
 
 .foot{padding:22px 48px;border-top:1px solid var(--line);color:var(--inert);
   font-size:13px;letter-spacing:.06em;text-transform:uppercase;

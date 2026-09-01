@@ -6,16 +6,21 @@ Every price is rendered through `pricing.price_label()` -- a bare number
 never reaches this page.
 
 `/order` is the one exception to "no session" above: it is the site's first
-state-changing route (CONTRACT.md section 12), reachable only signed in. It
-opens a production/restock request exactly the way Discord's shop panel
-does -- `core.orders.create_order`, the same function, same rules, same
-audit trail -- so nothing about what an order IS changes because it was
-opened from a browser instead of Discord. No money moves here; that only
-ever happens at `/orders` approval in Discord. The order is not pushed to
-the orders channel from this process (the web process holds no live
-Discord connection -- see `run_all.py`), so it surfaces to workers the same
-way a card that failed to post already does: it exists and is claimable
-from Discord's `/orders` command immediately.
+state-changing route (CONTRACT.md section 12), reachable only signed in. A
+signed-in visitor checks off any number of items across the grid, picks a
+quantity for each (a stack/4 stacks/16 stacks pill, or a typed custom
+amount -- no JavaScript anywhere on this site, so the pills are plain radio
+buttons, not a script-driven quantity field), and one submit opens a
+production/restock request for every checked item in a single POST. Each
+one goes through `core.orders.create_order` -- the same function, same
+rules, same audit trail Discord's shop panel uses -- independently, so one
+bad line (a stale item, a since-emptied field) never blocks the rest of the
+batch; the redirect reports exactly how many actually opened. No money
+moves here; that only ever happens at `/orders` approval in Discord. The
+order is not pushed to the orders channel from this process (the web
+process holds no live Discord connection -- see `run_all.py`), so it
+surfaces to workers the same way a card that failed to post already does:
+it exists and is claimable from Discord's `/orders` command immediately.
 """
 from __future__ import annotations
 
@@ -43,16 +48,25 @@ def _icon_html(item_name: str) -> str:
     return f'<div class="icon icon-fallback" aria-hidden="true">{letter}</div>'
 
 
-def _order_form_html(item: dict, identity) -> str:
-    if identity is None:
-        return '<a class="order-link" href="/login">Sign in to order</a>'
-    return f"""<form class="order-form" method="post" action="/order">
-<input type="hidden" name="item_id" value="{item['id']}">
-<input type="hidden" name="csrf" value="{esc(identity.csrf)}">
-<input type="number" name="pieces" value="{item['stack_size']}" min="1" max="999999"
-       inputmode="numeric" aria-label="Pieces to request">
-<button type="submit">Request</button>
-</form>"""
+def _cart_controls_html(item: dict) -> str:
+    """Checkbox + quantity pills for one item, inside the page's single
+    cart form. No JavaScript: the quantity choice is a plain radio group
+    (1 stack / 4 stacks / 16 stacks / a typed custom amount), not a script
+    writing into a shared field, so this works exactly the same with
+    scripting off."""
+    item_id = item["id"]
+    stack = item["stack_size"]
+    return f"""<div class="cart-controls">
+<label class="cart-check"><input type="checkbox" name="items" value="{item_id}"> Select</label>
+<div class="qty-pills">
+<label><input type="radio" name="qty_{item_id}" value="{stack}" checked> {stack:,}</label>
+<label><input type="radio" name="qty_{item_id}" value="{stack * 4}"> {stack * 4:,}</label>
+<label><input type="radio" name="qty_{item_id}" value="{stack * 16}"> {stack * 16:,}</label>
+<label class="qty-custom"><input type="radio" name="qty_{item_id}" value="custom"> Custom
+<input type="number" name="qty_custom_{item_id}" min="1" max="999999" inputmode="numeric"
+       aria-label="Custom quantity"></label>
+</div>
+</div>"""
 
 
 def _grid_html(items: list[dict], identity) -> str:
@@ -60,14 +74,25 @@ def _grid_html(items: list[dict], identity) -> str:
     for i in items:
         stock = get_stock(i["id"])
         price = esc(price_label(i["price_coins"], i["price_unit_pieces"], i["stack_size"]))
+        controls = (_cart_controls_html(i) if identity is not None
+                    else '<a class="order-link" href="/login">Sign in to order</a>')
         cards.append(f"""<div class="item">
 {_icon_html(i["name"])}
 <div class="item-name">{esc(i["name"])}</div>
 <div class="item-price">{price}</div>
 <div class="item-stock dim">{stock["pieces"]:,} on hand</div>
-{_order_form_html(i, identity)}
+{controls}
 </div>""")
     return f'<div class="itemgrid">{"".join(cards)}</div>'
+
+
+def _cart_submit_html(identity) -> str:
+    if identity is None:
+        return ""
+    return f"""<div class="cart-submit">
+<input type="hidden" name="csrf" value="{esc(identity.csrf)}">
+<button type="submit">Request selected items</button>
+</div>"""
 
 
 async def storefront(request: web.Request) -> web.Response:
@@ -78,10 +103,21 @@ async def storefront(request: web.Request) -> web.Response:
     categories = categories_with_items(active_only=True, include_empty=False)
 
     notice = ""
-    ordered_id = request.query.get("ordered")
-    if ordered_id and ordered_id.isdigit():
-        notice = (f'<p class="notice">Order #{ordered_id} opened -- a worker can now '
-                   f'claim it from Discord\'s <code>/orders</code>.</p>')
+    ordered_raw = request.query.get("ordered", "")
+    ordered_ids = [p for p in ordered_raw.split(",") if p.isdigit()]
+    if ordered_ids:
+        failed = request.query.get("failed", "")
+        failed_note = ""
+        if failed.isdigit() and int(failed) > 0:
+            n = int(failed)
+            failed_note = f' ({n} other{"s" if n != 1 else ""} could not be opened.)'
+        label = "Order" if len(ordered_ids) == 1 else "Orders"
+        ids_text = ", ".join(f"#{i}" for i in ordered_ids)
+        notice = (f'<p class="notice">{label} {ids_text} opened -- a worker can now '
+                   f'claim {"it" if len(ordered_ids) == 1 else "them"} from Discord\'s '
+                   f'<code>/orders</code>.{failed_note}</p>')
+    elif request.query.get("failed"):
+        notice = '<p class="notice notice-loss">Could not open any of the selected orders.</p>'
 
     if categories:
         sections = []
@@ -105,6 +141,10 @@ async def storefront(request: web.Request) -> web.Response:
         table = "".join(sections)
     else:
         table = '<p class="empty">Nothing stocked yet.</p>'
+
+    if categories and identity is not None:
+        table = (f'<form method="post" action="/order">'
+                  f'{_cart_submit_html(identity)}{table}{_cart_submit_html(identity)}</form>')
 
     body = f"""
 <div class="hero">
@@ -162,6 +202,19 @@ async def inventory(request: web.Request) -> web.Response:
     return page("Inventory", "stock", body, identity=identity)
 
 
+def _resolve_pieces(form, item_id: int) -> int:
+    """A checked item's quantity: whichever radio pill was chosen, or the
+    typed custom field when "custom" was chosen. Raises ValueError for
+    anything that isn't a positive whole number -- the caller turns that
+    into a per-item skip, never a whole-batch failure."""
+    choice = str(form.get(f"qty_{item_id}", "")).strip()
+    raw = str(form.get(f"qty_custom_{item_id}", "")).strip() if choice == "custom" else choice
+    pieces = int(raw)
+    if pieces <= 0:
+        raise ValueError("pieces must be positive")
+    return pieces
+
+
 async def order_item(request: web.Request) -> web.Response:
     identity = await resolve_identity(request)
     if identity is None:
@@ -172,22 +225,39 @@ async def order_item(request: web.Request) -> web.Response:
     if not secrets.compare_digest(supplied_csrf, identity.csrf or ""):
         return web.Response(text="Invalid or missing order token.", status=403)
 
-    try:
-        item_id = int(str(form.get("item_id", "")))
-        pieces = int(str(form.get("pieces", "")))
-        if pieces <= 0:
-            raise ValueError
-    except ValueError:
-        return web.Response(text="Pieces must be a positive whole number.", status=400)
+    checked = form.getall("items", [])
+    if not checked:
+        return web.Response(text="Select at least one item to request.", status=400)
 
-    try:
-        get_item(item_id)  # rejects a stale/tampered item id before opening anything
-        quote(item_id, pieces)  # same validation Discord's modal runs before create_order
-        order_id = create_order(item_id, pieces, created_by=identity.subject)
-    except (CatalogError, OrderError) as err:
-        return web.Response(text=f"Could not open that order: {err}", status=400)
+    opened: list[int] = []
+    failed = 0
+    for raw_id in checked:
+        try:
+            item_id = int(str(raw_id))
+        except ValueError:
+            failed += 1
+            continue
+        try:
+            pieces = _resolve_pieces(form, item_id)
+        except ValueError:
+            failed += 1
+            continue
+        try:
+            get_item(item_id)  # rejects a stale/tampered item id before opening anything
+            quote(item_id, pieces)  # same validation Discord's modal runs before create_order
+            order_id = create_order(item_id, pieces, created_by=identity.subject)
+        except (CatalogError, OrderError):
+            failed += 1
+            continue
+        opened.append(order_id)
 
-    return web.HTTPFound(f"/?ordered={order_id}")
+    if not opened:
+        return web.Response(text="Could not open any of the selected orders.", status=400)
+
+    query = f"ordered={','.join(str(i) for i in opened)}"
+    if failed:
+        query += f"&failed={failed}"
+    return web.HTTPFound(f"/?{query}")
 
 
 def register(app: web.Application) -> None:

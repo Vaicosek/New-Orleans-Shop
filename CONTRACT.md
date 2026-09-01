@@ -418,16 +418,21 @@ the rule below stands. Items are separated by whitespace and the same hairline r
 price-sheet tables already use, never a filled or bordered box.
 
 **`/order` is the site's one exception to "no session" above and its first state-changing
-route.** Signed-in only; anonymous visitors get a "sign in to order" link, never a form that
-looks live but cannot be submitted. It opens a production/restock request the exact way
-Discord's shop panel does — `core.orders.create_order`, the same function, same validation,
-same audit trail — so an order is the same thing regardless of which surface opened it. No
-money moves here; that only ever happens at `/orders` approval in Discord. CSRF-protected the
-same way `/logout` is (the session's own token, checked with `secrets.compare_digest`). The
-web process holds no live Discord connection (see section 13's process split), so an order
-opened from the site is not pushed to the orders channel — it surfaces to workers the same way
-a card that failed to post already does: it exists and is claimable from Discord's `/orders`
-immediately, no push required.
+route.** Signed-in only; anonymous visitors get a "sign in to order" link, never controls that
+look live but cannot be submitted. A signed-in visitor checks off any number of items across
+the grid -- a plain checkbox per item, no cart page, no JavaScript anywhere on this site -- and
+picks a quantity for each with a radio-pill group (1 stack / 4 stacks / 16 stacks, or a typed
+"Custom" amount), then one submit opens a production/restock request for every checked item in
+a single POST. Each one goes through `core.orders.create_order` independently -- the same
+function, same validation, same audit trail Discord's shop panel uses -- so one bad line (a
+stale item id, a since-emptied custom field) never blocks the rest of the batch; only a fully
+empty result is a hard 400. The redirect reports exactly how many orders opened and, when some
+did not, how many were skipped. No money moves here; that only ever happens at `/orders`
+approval in Discord. CSRF-protected the same way `/logout` is (the session's own token, checked
+with `secrets.compare_digest`). The web process holds no live Discord connection (see section
+13's process split), so an order opened from the site is not pushed to the orders channel -- it
+surfaces to workers the same way a card that failed to post already does: it exists and is
+claimable from Discord's `/orders` immediately, no push required.
 
 ### Design
 
