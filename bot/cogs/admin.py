@@ -17,7 +17,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-from core import alerts, auctions, land, refmarket
+from core import alerts, auctions, bonds, land, refmarket
 
 from .. import layout, loyalty_sync
 from ..permissions import is_staff
@@ -25,6 +25,7 @@ from ..views.admin import AdminPanelView, build_admin_embed
 from ..views.alerts import AlertAckView, build_alert_embed
 from ..views.auctions import AuctionCardView, auction_card_view, build_auction_embed
 from ..views.land import LandCardView, land_card_view, build_land_embed
+from ..views.bonds import BondCardView, bond_card_view, build_bond_embed
 
 
 class AdminCog(commands.Cog):
@@ -38,12 +39,14 @@ class AdminCog(commands.Cog):
         self.pull_reference_market.start()
         self.sweep_auctions.start()
         self.sweep_land.start()
+        self.sweep_bonds.start()
 
     def cog_unload(self) -> None:
         self.scan_alerts.cancel()
         self.pull_reference_market.cancel()
         self.sweep_auctions.cancel()
         self.sweep_land.cancel()
+        self.sweep_bonds.cancel()
 
     @app_commands.command(name="admin", description="Items, prices, thresholds, markets, treasury.")
     async def admin(self, interaction: discord.Interaction) -> None:
@@ -256,6 +259,48 @@ class AdminCog(commands.Cog):
 
     @sweep_land.before_loop
     async def before_sweep_land(self) -> None:
+        await self.bot.wait_until_ready()
+
+    # ------------------------------------------------------------------
+    # Bonds. A 15-minute cadence, not 1: coupons and maturities land on a
+    # day/month scale, not a minute one, so unlike the auction/land sweeps
+    # there is no user-visible reason to check every minute -- see
+    # core/bonds.py's `sweep_expired` for the catch-up-gradually reasoning
+    # this cadence implies.
+    # ------------------------------------------------------------------
+    @tasks.loop(minutes=15)
+    async def sweep_bonds(self) -> None:
+        """`bonds.sweep_expired()` never raises past a single bond's own
+        coupon/maturity -- same try/except shape as the other sweeps."""
+        try:
+            result = bonds.sweep_expired()
+        except Exception as err:            # noqa: BLE001 -- one sweep, not the process
+            print(f"[bonds] sweep raised: {err!r}", flush=True)
+            return
+        for bond_id in {*result["coupons_paid"], *result["matured"]}:
+            await self._refresh_bond_card(bond_id)
+
+    async def _refresh_bond_card(self, bond_id: int) -> None:
+        """Same reasoning as `_refresh_auction_card`/`_refresh_land_card`."""
+        from .. import queries
+        bond = queries.get_bond_detail(bond_id)
+        if bond is None or not bond.get("channel_id") or not bond.get("message_id"):
+            return
+        try:
+            channel = self.bot.get_channel(int(bond["channel_id"]))
+            if channel is None:
+                channel = await self.bot.fetch_channel(int(bond["channel_id"]))
+            message = await channel.fetch_message(int(bond["message_id"]))
+            await message.edit(embed=build_bond_embed(bond_id), view=bond_card_view(bond))
+        except discord.HTTPException as err:
+            print(f"[bonds] could not refresh card for bond {bond_id}: {err!r}", flush=True)
+
+    @sweep_bonds.error
+    async def sweep_bonds_error(self, err: BaseException) -> None:
+        print(f"[bonds] sweep loop crashed: {err!r} -- restarting", flush=True)
+
+    @sweep_bonds.before_loop
+    async def before_sweep_bonds(self) -> None:
         await self.bot.wait_until_ready()
 
 async def setup(bot: commands.Bot) -> None:

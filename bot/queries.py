@@ -219,6 +219,59 @@ def list_open_land(*, include_closed: bool = True, limit: int = 25) -> list[dict
     return [dict(r) for r in rows]
 
 
+def get_bond_detail(bond_id: int) -> Optional[dict[str, Any]]:
+    """One bond plus its holder count -- enough for the public card, which
+    shows units sold/remaining, next coupon date and maturity from the
+    bond row itself."""
+    with db_in() as c:
+        row = c.execute("SELECT * FROM bonds WHERE id = ?", (bond_id,)).fetchone()
+        if row is None:
+            return None
+        d = dict(row)
+        d["holder_count"] = c.execute(
+            "SELECT COUNT(*) AS n FROM bond_holdings WHERE bond_id = ?", (bond_id,)
+        ).fetchone()["n"]
+    return d
+
+
+def list_open_bonds(*, limit: int = 25) -> list[dict[str, Any]]:
+    with db_in() as c:
+        rows = c.execute(
+            "SELECT id, name FROM bonds WHERE status = 'open' ORDER BY issued_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_loan_detail(loan_id: int) -> Optional[dict[str, Any]]:
+    with db_in() as c:
+        row = c.execute("SELECT * FROM loans WHERE id = ?", (loan_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def list_open_loans(*, limit: int = 25) -> list[dict[str, Any]]:
+    """Every currently-open loan, across every borrower -- staff's
+    write-off picker."""
+    with db_in() as c:
+        rows = c.execute(
+            "SELECT id, subject, principal, interest, paid, due_at FROM loans "
+            "WHERE status = 'open' ORDER BY issued_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def list_subject_loans(subject: str, *, limit: int = 25) -> list[dict[str, Any]]:
+    """One borrower's own open loans -- the /wallet repay picker."""
+    with db_in() as c:
+        rows = c.execute(
+            "SELECT id, principal, interest, paid, due_at FROM loans "
+            "WHERE subject = ? AND status = 'open' ORDER BY issued_at DESC LIMIT ?",
+            (subject, limit),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def list_paid_workers(order_id: int) -> list[str]:
     """Every distinct worker actually paid for `order_id` -- read after
     `orders.approve()` so the bot layer can sync each one's loyalty rank

@@ -334,6 +334,75 @@ CREATE TABLE IF NOT EXISTS land_bids (
 );
 CREATE INDEX IF NOT EXISTS ix_land_bids_land ON land_bids(land_id, amount DESC);
 
+-- Treasury bonds. treasury:shop issues a fixed-term, fixed-rate IOU;
+-- players buy units outright (a plain money.transfer, buyer -> treasury:shop
+-- -- no escrow needed, this is a sale, not a bid) and hold them until a
+-- periodic coupon or the final maturity payout moves money the other way.
+-- No collateral, no company/stock-market tie-in, no default handling: if
+-- treasury:shop cannot fund a coupon or a maturity payout it simply refuses
+-- (deficit_floor 0, same as every other treasury payout in this file) and
+-- the next sweep retries once it is funded. See CONTRACT.md section 11b.
+CREATE TABLE IF NOT EXISTS bonds (
+    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+    name                  TEXT    NOT NULL,
+    unit_price            INTEGER NOT NULL CHECK (unit_price > 0),
+    units_total           INTEGER NOT NULL CHECK (units_total > 0),
+    units_sold            INTEGER NOT NULL DEFAULT 0 CHECK (units_sold >= 0),
+    -- Basis points, not percent: 1 bps = 0.01%. An integer unit that never
+    -- needs a float or a decimal string to express "0.5% a month" -- typed
+    -- as 50, not as a percent that then has to be parsed as a fraction.
+    coupon_bps            INTEGER NOT NULL CHECK (coupon_bps >= 0),
+    coupon_interval_days  INTEGER NOT NULL CHECK (coupon_interval_days > 0),
+    term_days             INTEGER NOT NULL CHECK (term_days > 0),
+    status                TEXT    NOT NULL DEFAULT 'open'
+                                  CHECK (status IN ('open', 'matured', 'voided')),
+    created_by            TEXT    NOT NULL,
+    issued_at             TEXT    NOT NULL DEFAULT (datetime('now')),
+    matures_at            TEXT    NOT NULL,
+    -- The next coupon this bond owes. Advanced only in the SAME transaction
+    -- that pays it (compare-and-swap on this column), so two concurrent
+    -- sweep ticks can never both pay the same period.
+    next_coupon_at        TEXT    NOT NULL,
+    channel_id            TEXT,
+    message_id            TEXT,
+    CHECK (units_sold <= units_total)
+);
+CREATE INDEX IF NOT EXISTS ix_bonds_open ON bonds(status) WHERE status = 'open';
+CREATE INDEX IF NOT EXISTS ix_bonds_message ON bonds(message_id);
+
+-- One row per (bond, holder), units accumulate across repeat purchases.
+CREATE TABLE IF NOT EXISTS bond_holdings (
+    bond_id   INTEGER NOT NULL REFERENCES bonds(id) ON DELETE CASCADE,
+    subject   TEXT    NOT NULL REFERENCES wallets(subject),
+    units     INTEGER NOT NULL CHECK (units > 0),
+    bought_at TEXT    NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (bond_id, subject)
+);
+
+-- Flat-limit treasury loans. Simple version: no scored credit history, no
+-- automatic collection -- the credit limit is a flat figure keyed only by
+-- the borrower's CURRENT loyalty rank (core/loyalty.py), interest and term
+-- are fixed system-wide constants, not negotiated per loan. `principal` and
+-- `interest` are snapshotted at issuance so a later change to the fixed
+-- rate never reprices a loan already out, same reasoning as `items`'
+-- snapshotted order pricing. See CONTRACT.md section 11c.
+CREATE TABLE IF NOT EXISTS loans (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    subject         TEXT    NOT NULL REFERENCES wallets(subject),
+    principal       INTEGER NOT NULL CHECK (principal > 0),
+    interest        INTEGER NOT NULL CHECK (interest >= 0),
+    paid            INTEGER NOT NULL DEFAULT 0 CHECK (paid >= 0),
+    status          TEXT    NOT NULL DEFAULT 'open'
+                            CHECK (status IN ('open', 'repaid', 'written_off')),
+    issued_at       TEXT    NOT NULL DEFAULT (datetime('now')),
+    due_at          TEXT    NOT NULL,
+    repaid_at       TEXT,
+    written_off_at  TEXT,
+    written_off_by  TEXT,
+    CHECK (paid <= principal + interest)
+);
+CREATE INDEX IF NOT EXISTS ix_loans_subject ON loans(subject, status);
+
 -- ---------------------------------------------------------------- betting
 -- Discord only. No module under web/ may read anything below this line;
 -- tests/test_no_wagering_on_web.py fails the build if one does.

@@ -12,12 +12,13 @@ import secrets
 
 import discord
 
-from core import alerts, audit, auctions as auctions_core, catalog, db, land as land_core, loyalty, money, predictions, pricing
+from core import alerts, audit, auctions as auctions_core, bonds as bonds_core, catalog, db, land as land_core, loans as loans_core, loyalty, money, predictions, pricing
 
 from .. import addressing, loyalty_sync
 
 from . import auctions as auction_views
 from . import land as land_views
+from . import bonds as bond_views
 from . import pickers
 from .. import layout
 from .. import permissions
@@ -596,6 +597,102 @@ class _ListLandPricingModal(discord.ui.Modal):
         )
 
 
+class _IssueBondDetailsModal(discord.ui.Modal):
+    """Step 1 of 2: name, unit price, and how many units exist. Split from
+    the rate/term fields into its own modal for the same reason as land's
+    two-step listing modal -- Discord caps a modal at 5 fields and this is
+    6 total."""
+
+    def __init__(self, config):
+        super().__init__(title="Issue bond (1/2): units", timeout=300)
+        self.config = config
+        self.name = discord.ui.TextInput(label="Bond name", placeholder="e.g. Shop Bond Series 1",
+                                          max_length=100)
+        self.unit_price = discord.ui.TextInput(label="Price per unit (g)", placeholder="e.g. 100",
+                                                 max_length=10)
+        self.units_total = discord.ui.TextInput(label="Total units", placeholder="e.g. 500",
+                                                  max_length=8)
+        for field in (self.name, self.unit_price, self.units_total):
+            self.add_item(field)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        try:
+            unit_price = int(str(self.unit_price.value).strip())
+            units_total = int(str(self.units_total.value).strip())
+        except ValueError:
+            await interaction.response.send_message(
+                "Price per unit and total units must be whole numbers.", ephemeral=True)
+            return
+        details = {"name": str(self.name.value).strip(), "unit_price": unit_price,
+                   "units_total": units_total}
+        await interaction.response.send_modal(_IssueBondTermsModal(details, self.config))
+
+
+class _IssueBondTermsModal(discord.ui.Modal):
+    """Step 2 of 2: the rate and the calendar. Coupon rate is typed in
+    basis points (100 = 1%) -- an integer unit that can express "0.5% a
+    month" (50 bps) without a decimal string, same reasoning as
+    core/bonds.py's `coupon_bps` column."""
+
+    def __init__(self, details: dict, config):
+        super().__init__(title=f"Issue bond (2/2): {details['name']}"[:45], timeout=300)
+        self.details = details
+        self.config = config
+        self.coupon_bps = discord.ui.TextInput(
+            label="Coupon rate, bps (100 = 1%)", placeholder="e.g. 200 for 2%", max_length=6)
+        self.coupon_interval_days = discord.ui.TextInput(
+            label="Coupon every N days", placeholder="e.g. 30", max_length=5)
+        self.term_days = discord.ui.TextInput(
+            label="Term, in days", placeholder="e.g. 90", max_length=5)
+        for field in (self.coupon_bps, self.coupon_interval_days, self.term_days):
+            self.add_item(field)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        try:
+            coupon_bps = int(str(self.coupon_bps.value).strip())
+            coupon_interval_days = int(str(self.coupon_interval_days.value).strip())
+            term_days = int(str(self.term_days.value).strip())
+        except ValueError:
+            await interaction.followup.send(
+                "Coupon rate, coupon interval and term must all be whole numbers.",
+                ephemeral=True)
+            return
+        try:
+            bond_id = bonds_core.issue(
+                self.details["name"], self.details["unit_price"], self.details["units_total"],
+                coupon_bps, coupon_interval_days, term_days,
+                created_by=money.user(interaction.user.id),
+            )
+        except bonds_core.BondError as err:
+            await interaction.followup.send(f"Could not issue that bond: {err}", ephemeral=True)
+            return
+
+        channel = layout.channel(interaction.client, self.config, "channel:bonds")
+        post_note = ""
+        if channel is None:
+            post_note = (" Could not find the bonds channel to post a public card -- "
+                         "the bond still exists and will still pay coupons on time.")
+        else:
+            try:
+                embed = bond_views.build_bond_embed(bond_id)
+                posted = await channel.send(embed=embed, view=bond_views.BondCardView())
+            except discord.HTTPException as err:
+                post_note = f" Could not post the public card ({err})."
+            else:
+                if posted is not None:
+                    bonds_core.set_message(bond_id, str(channel.id), str(posted.id))
+                    post_note = " Posted in the bonds channel."
+
+        await interaction.followup.send(
+            f"Issued bond \"{self.details['name']}\" (#{bond_id}): "
+            f"{self.details['units_total']:,} unit(s) at "
+            f"{money_text(self.details['unit_price'])} each, coupon every "
+            f"{coupon_interval_days} day(s), term {term_days} day(s).{post_note}",
+            ephemeral=True,
+        )
+
+
 class _OpenAuctionModal(discord.ui.Modal):
     """Duration, pieces, minimum bid and minimum raise are all free-text
     quantities -- the lot itself is already resolved by the item picker
@@ -727,6 +824,70 @@ class _VoidLandGate(discord.ui.View):
     @discord.ui.button(label="Confirm void", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
         await interaction.response.send_modal(_VoidLandConfirmModal(self.listing, self.voider))
+
+
+class _VoidBondConfirmModal(discord.ui.Modal):
+    """Typed confirmation for an irreversible refund: the bond's own NAME
+    -- never its id. Same shape as _VoidAuctionConfirmModal/_VoidLandConfirmModal."""
+
+    def __init__(self, bond: dict, voider: str):
+        super().__init__(title="Confirm void", timeout=300)
+        self.bond = bond
+        self.voider = voider
+        self.confirm = discord.ui.TextInput(
+            label=f"Type the bond name: {bond['name']}"[:45],
+            placeholder="Type it exactly as shown above", max_length=100,
+        )
+        self.add_item(self.confirm)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        if str(self.confirm.value).strip().lower() != self.bond["name"].strip().lower():
+            await interaction.followup.send("Bond name didn't match \u00b7 void cancelled.",
+                                             ephemeral=True)
+            return
+        try:
+            bonds_core.void(self.bond["id"], actor=self.voider)
+        except (bonds_core.BondError, money.MoneyError) as err:
+            await interaction.followup.send(f"Could not void: {err}", ephemeral=True)
+            return
+        await interaction.followup.send(
+            f"Voided bond #{self.bond['id']} ({self.bond['name']}).", ephemeral=True)
+
+
+class _VoidBondGate(discord.ui.View):
+    def __init__(self, bond: dict, voider: str) -> None:
+        super().__init__(timeout=120)
+        self.bond = bond
+        self.voider = voider
+
+    @discord.ui.button(label="Confirm void", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        await interaction.response.send_modal(_VoidBondConfirmModal(self.bond, self.voider))
+
+
+class _WriteOffLoanGate(discord.ui.View):
+    """No typed name: unlike void, nothing here moves money -- the treasury
+    already lost the principal at disbursement, this only stops chasing
+    it. A single Confirm button on an already-previewed figure is enough,
+    same as _WriteOffLoanGate's own preview text shows the real amount
+    before this ever renders."""
+
+    def __init__(self, loan: dict, actor: str) -> None:
+        super().__init__(timeout=120)
+        self.loan = loan
+        self.actor = actor
+
+    @discord.ui.button(label="Confirm write-off", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        await interaction.response.defer(ephemeral=True)
+        try:
+            loans_core.write_off(self.loan["id"], actor=self.actor)
+        except loans_core.LoanError as err:
+            await interaction.followup.send(f"Could not write that off: {err}", ephemeral=True)
+            return
+        await interaction.followup.send(
+            f"Wrote off loan #{self.loan['id']} ({self.loan['subject']}).", ephemeral=True)
 
 
 class AdminPanelView(_StaffGatedView):
@@ -1116,6 +1277,63 @@ class AdminPanelView(_StaffGatedView):
 
         await interaction.response.send_message(
             "Pick a listing to void:",
+            view=pickers.OptionPickerView(self.owner_id, options, picked),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Issue bond", style=discord.ButtonStyle.primary, row=3)
+    async def issue_bond(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        await interaction.response.send_modal(_IssueBondModal(self.config))
+
+    @discord.ui.button(label="Void bond", style=discord.ButtonStyle.secondary, row=4)
+    async def void_bond(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        open_bonds = queries.list_open_bonds(limit=25)
+        options = [(f"{b['name']} (#{b['id']})"[:100], str(b["id"])) for b in open_bonds]
+
+        async def picked(inter: discord.Interaction, bond_id_str: str) -> None:
+            if bond_id_str == "_none":
+                await inter.response.send_message("No bonds to void.", ephemeral=True)
+                return
+            bond = queries.get_bond_detail(int(bond_id_str))
+            await inter.response.send_message(
+                f"Voiding \"{bond['name']}\" refunds every holder's principal in full "
+                "(not coupons already paid). This cannot be undone.",
+                view=_VoidBondGate(bond, money.user(inter.user.id)),
+                ephemeral=True,
+            )
+
+        await interaction.response.send_message(
+            "Pick a bond to void:",
+            view=pickers.OptionPickerView(self.owner_id, options, picked),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Write off loan", style=discord.ButtonStyle.secondary, row=4)
+    async def write_off_loan(self, interaction: discord.Interaction,
+                              _button: discord.ui.Button) -> None:
+        open_loans = queries.list_open_loans(limit=25)
+        options = [
+            (f"{l['subject']} #{l['id']}: {l['principal'] + l['interest'] - l['paid']:,}g owed"[:100],
+             str(l["id"]))
+            for l in open_loans
+        ]
+
+        async def picked(inter: discord.Interaction, loan_id_str: str) -> None:
+            if loan_id_str == "_none":
+                await inter.response.send_message("No open loans.", ephemeral=True)
+                return
+            loan = queries.get_loan_detail(int(loan_id_str))
+            remaining = loan["principal"] + loan["interest"] - loan["paid"]
+            await inter.response.send_message(
+                f"Write off loan #{loan['id']} ({loan['subject']})? This forgives "
+                f"{money_text(remaining)} still owed -- the treasury already paid this out "
+                "and will not get it back. This also frees their credit limit again.",
+                view=_WriteOffLoanGate(loan, money.user(inter.user.id)),
+                ephemeral=True,
+            )
+
+        await interaction.response.send_message(
+            "Pick a loan to write off:",
             view=pickers.OptionPickerView(self.owner_id, options, picked),
             ephemeral=True,
         )

@@ -347,6 +347,65 @@ describes for auctions. Land listings post to their own `#land` channel
 their own `/admin` buttons ("List land", "Void land") -- kept separate from the auction
 channel and card so a plot never gets mistaken for an item lot.
 
+## 11b. Bonds
+
+**Treasury-issued, not corporate.** `treasury:shop` issues a bond series -- a unit price, a
+total unit count, a coupon rate (in basis points: 1 bps = 0.01%, so "0.5% a month" is typed as
+50, never as a decimal percent string), a coupon interval, and a term. This is deliberately
+NOT AbexTech's item-collateralized corporate debt (`cogs/bonds.py`) -- there is no company, no
+stock market, and no default/collateral machinery here. The treasury either has the coins to
+pay a coupon or a maturity payout, or it doesn't (`treasury:shop`'s deficit floor is 0, same
+as every other treasury payout in this codebase); an underfunded period simply is not paid
+yet, and the next sweep retries it once the treasury is funded.
+
+**Buying is a sale, not a bid.** A player buys units outright -- `money.transfer`, buyer to
+treasury, on the spot, no escrow, no hold. `units_sold` is guarded by a compare-and-swap
+(`WHERE units_sold + ? <= units_total`) so two concurrent buyers can never oversell a series.
+
+**Coupons and maturity are each one all-or-nothing transaction.** Paying a due coupon
+advances `next_coupon_at` in the SAME transaction as the payout, itself guarded by a
+compare-and-swap on that column, so two concurrent sweep ticks can never both claim the same
+period. If the treasury cannot fund every holder's share, `money.transfer` raises and the
+WHOLE transaction rolls back -- including the `next_coupon_at` advance -- so a period that
+could not be fully paid is never marked paid. The same shape covers maturity: principal is
+repaid to every holder or the bond stays open, never something in between. A one-bond failure
+(insufficient treasury funds) must never block every other bond's sweep, so
+`core/bonds.py::sweep_expired` catches `money.MoneyError` alongside its own `BondError`, not
+just the latter -- unlike auctions/land, where settlement only ever captures an
+already-escrowed hold, a bond payout is a FRESH transfer with nothing pre-reserved, so running
+out of treasury funds mid-sweep is a real, expected failure mode here.
+
+**No new slash command.** Issuing and voiding live in `/admin`, next to auctions and land.
+Buying lives entirely on the bond's own persistent public card in the bonds channel, mirroring
+auctions'/land's card pattern. `void` (staff-only, pre-maturity) refunds every current
+holder's PRINCIPAL -- never coupons already paid, nobody has to give those back -- and cancels
+the series.
+
+## 11c. Loans
+
+**Flat-limit, not scored.** Deliberately NOT AbexTech's `bank_policy.py` (scored credit
+history, automatic collection, garnishment on overdue balances). A player borrows directly
+from `treasury:shop`, self-serve, up to a flat credit limit keyed ONLY by their current
+loyalty rank (`core/loyalty.py`'s `effective_tier`) -- not by repayment history. Interest
+(`LOAN_INTEREST_PCT`) and term (`LOAN_TERM_DAYS`) are fixed system-wide constants, never
+negotiated per loan, and are snapshotted onto the loan row at issuance so a later change to
+either constant never reprices a loan already out.
+
+**Disbursement and repayment are plain transfers -- no escrow.** `borrow` moves the principal
+treasury -> borrower immediately; there is nothing to hold, since nothing is being bid on or
+auctioned. `repay` clamps any typed amount to what is actually still owed, so an overpayment
+by typo is capped, never captured as an accidental tip to the treasury.
+
+**`write_off` (staff-only) moves no money.** The treasury already lost the principal the
+moment it disbursed; writing off only stops chasing an uncollectible balance. It also frees
+the borrower's credit limit again -- `outstanding_owed` sums only 'open' loans -- a deliberate
+simplicity trade-off: this is forgiveness, not a ban. A staff member who wants a real ban
+combines `write_off` with freezing the wallet or setting `orders_blocked`.
+
+**Self-serve, not staff-approved.** Unlike bonds and land (staff lists, players act), a loan
+needs no staff step at all: the flat credit limit itself is the safety control. `/wallet`
+carries Borrow and Repay buttons beside the existing Transfer button.
+
 ## 11. Loyalty ranks
 
 **Adapted from AbexTech's `abex_tiers.py`, not copied.** AbexTech blends two

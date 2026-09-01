@@ -17,10 +17,11 @@ from datetime import datetime, timezone
 
 import discord
 
+from core import loans as loans_core
 from core import loyalty, money
 
 from .. import queries
-from .pickers import UserPickerView
+from .pickers import OptionPickerView, UserPickerView
 from ..ui.embed import SEP, money_text, panel_embed, rows
 
 
@@ -43,6 +44,10 @@ def build_wallet_embed(subject: str) -> discord.Embed:
         lines.append(
             f"{loy['next_tier']['points_needed']:,} points to {loy['next_tier']['name']}"
         )
+    owed = loans_core.outstanding_owed(subject)
+    if owed:
+        limit = loans_core.credit_limit_for(subject)
+        lines.append(f"Owed on loans: {money_text(owed)} (limit {money_text(limit)})")
     return panel_embed("Your wallet", rows(lines))
 
 
@@ -211,6 +216,179 @@ class _TransferConfirmGate(discord.ui.View):
             pass
 
 
+class _BorrowAmountModal(discord.ui.Modal):
+    """How much to borrow -- a quantity, capped against the borrower's flat
+    credit limit at submit time (the real check is still in
+    core/loans.py's `borrow`; this is just an early, friendlier refusal)."""
+
+    def __init__(self, borrower_id: int) -> None:
+        super().__init__(title="Borrow", timeout=300)
+        self.borrower_id = borrower_id
+        self.amount = discord.ui.TextInput(
+            label="Amount (g)", placeholder="e.g. 100", max_length=10, required=True
+        )
+        self.add_item(self.amount)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        try:
+            amount = int(str(self.amount.value).strip())
+            if amount <= 0:
+                raise ValueError
+        except ValueError:
+            await interaction.followup.send("Amount must be a positive whole number.", ephemeral=True)
+            return
+
+        subject = money.user(self.borrower_id)
+        limit = loans_core.credit_limit_for(subject)
+        owed = loans_core.outstanding_owed(subject)
+        if owed + amount > limit:
+            await interaction.followup.send(
+                f"You already owe {money_text(owed)}; your limit is {money_text(limit)}. "
+                f"That leaves {money_text(max(limit - owed, 0))} you can still borrow.",
+                ephemeral=True,
+            )
+            return
+
+        interest = (amount * loans_core.LOAN_INTEREST_PCT) // 100
+        idem_key = money.new_event_id("loan.borrow")
+        await interaction.followup.send(
+            f"Borrow {money_text(amount)}? You will owe {money_text(amount + interest)} "
+            f"({loans_core.LOAN_INTEREST_PCT}% flat interest) within "
+            f"{loans_core.LOAN_TERM_DAYS} days.",
+            view=_BorrowConfirmGate(self.borrower_id, amount, idem_key),
+            ephemeral=True,
+        )
+
+
+class _BorrowConfirmGate(discord.ui.View):
+    def __init__(self, borrower_id: int, amount: int, idem_key: str) -> None:
+        super().__init__(timeout=120)
+        self.borrower_id, self.amount, self.idem_key = borrower_id, amount, idem_key
+        self._submitted = False
+
+    @discord.ui.button(label="Confirm borrow", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction,
+                       button: discord.ui.Button) -> None:
+        if self._submitted:
+            await interaction.response.send_message("That loan was already submitted.",
+                                                      ephemeral=True)
+            return
+        self._submitted = True
+        button.disabled = True
+        await interaction.response.edit_message(view=self)
+
+        subject = money.user(self.borrower_id)
+        try:
+            with money.guarded(self.idem_key, service="shop", endpoint="loan.borrow",
+                                payload={"subject": subject, "amount": self.amount}) as g:
+                if g.replay:
+                    result = g.response
+                else:
+                    result = loans_core.borrow(subject, self.amount, conn=g.conn)
+                    g.set_response(result)
+        except loans_core.LoanError as err:
+            self._submitted = False
+            button.disabled = False
+            await interaction.followup.send(f"Could not borrow that: {err}", ephemeral=True)
+            return
+        except money.MoneyError as err:
+            await interaction.followup.send(f"Could not borrow that: {err}", ephemeral=True)
+            return
+
+        await interaction.followup.send(
+            f"Borrowed {money_text(self.amount)} (loan #{result['loan_id']}). "
+            f"You owe {money_text(result['owed'])} within {loans_core.LOAN_TERM_DAYS} days.",
+            ephemeral=True,
+        )
+
+
+class _RepayAmountModal(discord.ui.Modal):
+    """The loan itself is already resolved by the picker that opens this;
+    the amount is free text, clamped server-side to what is actually owed."""
+
+    def __init__(self, borrower_id: int, loan: dict) -> None:
+        remaining = loan["principal"] + loan["interest"] - loan["paid"]
+        super().__init__(title=f"Repay loan #{loan['id']}"[:45], timeout=300)
+        self.borrower_id, self.loan_id, self.remaining = borrower_id, loan["id"], remaining
+        self.amount = discord.ui.TextInput(
+            label=f"Amount (g) -- {remaining:,} owed", placeholder=f"e.g. {remaining}",
+            max_length=10, required=True,
+        )
+        self.add_item(self.amount)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        try:
+            amount = int(str(self.amount.value).strip())
+            if amount <= 0:
+                raise ValueError
+        except ValueError:
+            await interaction.followup.send("Amount must be a positive whole number.", ephemeral=True)
+            return
+
+        subject = money.user(self.borrower_id)
+        bal = money.balance(subject)
+        if amount > bal.available:
+            await interaction.followup.send(
+                f"You only have {money_text(bal.available)} available.", ephemeral=True)
+            return
+
+        idem_key = money.new_event_id("loan.repay")
+        pay = min(amount, self.remaining)
+        await interaction.followup.send(
+            f"Repay {money_text(pay)} on loan #{self.loan_id}?"
+            + (" This pays it off in full." if pay >= self.remaining else
+               f" {money_text(self.remaining - pay)} would remain."),
+            view=_RepayConfirmGate(self.borrower_id, self.loan_id, amount, idem_key),
+            ephemeral=True,
+        )
+
+
+class _RepayConfirmGate(discord.ui.View):
+    def __init__(self, borrower_id: int, loan_id: int, amount: int, idem_key: str) -> None:
+        super().__init__(timeout=120)
+        self.borrower_id, self.loan_id = borrower_id, loan_id
+        self.amount, self.idem_key = amount, idem_key
+        self._submitted = False
+
+    @discord.ui.button(label="Confirm repayment", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction,
+                       button: discord.ui.Button) -> None:
+        if self._submitted:
+            await interaction.response.send_message("That repayment was already submitted.",
+                                                      ephemeral=True)
+            return
+        self._submitted = True
+        button.disabled = True
+        await interaction.response.edit_message(view=self)
+
+        subject = money.user(self.borrower_id)
+        try:
+            with money.guarded(self.idem_key, service="shop", endpoint="loan.repay",
+                                payload={"loan": self.loan_id, "amount": self.amount}) as g:
+                if g.replay:
+                    result = g.response
+                else:
+                    result = loans_core.repay(self.loan_id, subject, self.amount, conn=g.conn)
+                    g.set_response(result)
+        except loans_core.LoanError as err:
+            self._submitted = False
+            button.disabled = False
+            await interaction.followup.send(f"Could not repay that: {err}", ephemeral=True)
+            return
+        except money.MoneyError as err:
+            await interaction.followup.send(f"Could not repay that: {err}", ephemeral=True)
+            return
+
+        await interaction.followup.send(
+            f"Paid {money_text(result['paid_this_time'])} on loan #{self.loan_id}."
+            + (" Paid in full." if result["status"] == "repaid"
+               else f" {money_text(result['remaining'])} remaining."),
+            ephemeral=True,
+        )
+
+
 class WalletPanelView(discord.ui.View):
     def __init__(self, owner_id: int) -> None:
         super().__init__(timeout=300)
@@ -239,5 +417,34 @@ class WalletPanelView(discord.ui.View):
         await interaction.response.send_message(
             "Who are you sending gold to?",
             view=UserPickerView(self.owner_id, picked),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Borrow", style=discord.ButtonStyle.secondary)
+    async def borrow(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        await interaction.response.send_modal(_BorrowAmountModal(self.owner_id))
+
+    @discord.ui.button(label="Repay", style=discord.ButtonStyle.secondary)
+    async def repay(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        subject = money.user(self.owner_id)
+        loans = queries.list_subject_loans(subject)
+        options = [
+            (f"#{l['id']}: {l['principal'] + l['interest'] - l['paid']:,}g owed"[:100], str(l["id"]))
+            for l in loans
+        ]
+
+        async def picked(inter: discord.Interaction, loan_id_str: str) -> None:
+            if loan_id_str == "_none":
+                await inter.response.send_message("You have no open loans.", ephemeral=True)
+                return
+            loan = queries.get_loan_detail(int(loan_id_str))
+            if loan is None or loan["status"] != "open":
+                await inter.response.send_message("That loan is no longer open.", ephemeral=True)
+                return
+            await inter.response.send_modal(_RepayAmountModal(self.owner_id, loan))
+
+        await interaction.response.send_message(
+            "Which loan are you repaying?",
+            view=OptionPickerView(self.owner_id, options, picked),
             ephemeral=True,
         )
