@@ -72,6 +72,8 @@ DESIRED: tuple[Desired, ...] = (
             topic="Open orders and claims. /orders", env_name="ORDERS_CHANNEL_ID"),
     Desired("channel:auctions", "channel", "auctions", parent="category:market",
             topic="Public open-bid auctions. Bid with the button on each listing."),
+    Desired("channel:land", "channel", "land", parent="category:market",
+            topic="Land plot listings. Bid or buy now with the button on each listing."),
 
     Desired("category:games", "category", "Games"),
     Desired("channel:casino", "channel", "casino", parent="category:games",

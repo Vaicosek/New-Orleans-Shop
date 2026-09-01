@@ -317,6 +317,36 @@ public card in the auctions channel -- a Bid button, an amount modal, and a conf
 mirroring `bot/views/orders.py`'s order card pattern down to resolving the auction id from the
 message's own embed footer rather than trusting `self`.
 
+## 11a. Land listings
+
+**Staff-listed plots, not the AbexTech land system.** This is deliberately the simple version:
+a plot is free text a staff member types (name, description, a location), never a chunk-claim-mod
+integration, an AI valuation engine, or a tie-in to any stock market -- those exist in a
+different, unrelated project and were explicitly scoped out. Ownership transfer in-game is a
+manual staff task, exactly like handing over a won auction lot or an order's delivery.
+
+**Same money contract as auctions, mirrored rather than reused.** `core/land.py` and the
+`land_listings`/`land_bids` tables deliberately parallel `core/auctions.py` and
+`auctions`/`auction_bids` rather than extending them, so nothing about the already-live,
+tested auction path is touched by this feature. A bid places a fresh hold for its full amount;
+the moment a higher bid supersedes it, the previous leader's hold is released, in that order
+(new hold first) for the same reason as S10. `orders_blocked` gates bidding, not
+`gambling_blocked` -- commerce, not a wager, same reasoning as auctions.
+
+**Buy-now is the one real addition.** A listing may optionally carry a `buy_now_price`. A bid
+that clears it settles the listing *instantly*, inside the same `land.bid()` call that placed
+it -- there is no window between the winning bid landing and the sale being final, the same
+"no insider-window, no staff judgement call" reasoning S10 gives for an auction's close. A bid
+below `buy_now_price` behaves exactly like an ordinary auction bid and leaves the listing open.
+
+**Lifecycle:** staff types a plot's name/description/location plus a minimum bid, minimum
+raise, duration, and an optional buy-now price. Bidding, closing, sweeping (a one-minute loop
+in `bot/cogs/admin.py`, alongside the auction sweep) and voiding all work exactly as S10
+describes for auctions. Land listings post to their own `#land` channel
+(`core/provision.py`'s `channel:land`), with their own persistent card (`LandCardView`) and
+their own `/admin` buttons ("List land", "Void land") -- kept separate from the auction
+channel and card so a plot never gets mistaken for an item lot.
+
 ## 11. Loyalty ranks
 
 **Adapted from AbexTech's `abex_tiers.py`, not copied.** AbexTech blends two

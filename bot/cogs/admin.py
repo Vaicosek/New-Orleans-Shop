@@ -17,13 +17,14 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-from core import alerts, auctions, refmarket
+from core import alerts, auctions, land, refmarket
 
 from .. import layout, loyalty_sync
 from ..permissions import is_staff
 from ..views.admin import AdminPanelView, build_admin_embed
 from ..views.alerts import AlertAckView, build_alert_embed
 from ..views.auctions import AuctionCardView, auction_card_view, build_auction_embed
+from ..views.land import LandCardView, land_card_view, build_land_embed
 
 
 class AdminCog(commands.Cog):
@@ -36,11 +37,13 @@ class AdminCog(commands.Cog):
         self.scan_alerts.start()
         self.pull_reference_market.start()
         self.sweep_auctions.start()
+        self.sweep_land.start()
 
     def cog_unload(self) -> None:
         self.scan_alerts.cancel()
         self.pull_reference_market.cancel()
         self.sweep_auctions.cancel()
+        self.sweep_land.cancel()
 
     @app_commands.command(name="admin", description="Items, prices, thresholds, markets, treasury.")
     async def admin(self, interaction: discord.Interaction) -> None:
@@ -199,6 +202,60 @@ class AdminCog(commands.Cog):
 
     @sweep_auctions.before_loop
     async def before_sweep(self) -> None:
+        await self.bot.wait_until_ready()
+
+    # ------------------------------------------------------------------
+    # Land. Same reasoning as the auction sweep above -- a listing's winner
+    # is the objective top bid at close (or whoever cleared buy-now, which
+    # settles itself instantly inside land.bid), never a staff call.
+    # ------------------------------------------------------------------
+    @tasks.loop(minutes=1)
+    async def sweep_land(self) -> None:
+        """`land.sweep_expired()` never raises past a single listing's own
+        close/settle -- same try/except shape as `sweep_auctions`."""
+        try:
+            settled_ids = land.sweep_expired()
+        except Exception as err:            # noqa: BLE001 -- one sweep, not the process
+            print(f"[land] sweep raised: {err!r}", flush=True)
+            return
+        for land_id in settled_ids:
+            await self._refresh_land_card(land_id)
+            await self._sync_land_winner_rank(land_id)
+
+    async def _sync_land_winner_rank(self, land_id: int) -> None:
+        """Same reasoning as `_sync_winner_rank`: a settled listing's
+        winner just spent real coins, best-effort loyalty-rank sync."""
+        from .. import queries
+        config = getattr(self.bot, "nola_config", None)
+        if config is None:
+            return
+        listing = queries.get_land_detail(land_id)
+        if listing is None or not listing.get("winner"):
+            return
+        await loyalty_sync.sync_rank_role(self.bot, config.guild_id, listing["winner"])
+
+    async def _refresh_land_card(self, land_id: int) -> None:
+        """Same reasoning as `_refresh_auction_card`."""
+        from .. import queries
+        listing = queries.get_land_detail(land_id)
+        if listing is None or not listing.get("channel_id") or not listing.get("message_id"):
+            return
+        try:
+            channel = self.bot.get_channel(int(listing["channel_id"]))
+            if channel is None:
+                channel = await self.bot.fetch_channel(int(listing["channel_id"]))
+            message = await channel.fetch_message(int(listing["message_id"]))
+            await message.edit(embed=build_land_embed(land_id),
+                                view=land_card_view(listing))
+        except discord.HTTPException as err:
+            print(f"[land] could not refresh card for listing {land_id}: {err!r}", flush=True)
+
+    @sweep_land.error
+    async def sweep_land_error(self, err: BaseException) -> None:
+        print(f"[land] sweep loop crashed: {err!r} -- restarting", flush=True)
+
+    @sweep_land.before_loop
+    async def before_sweep_land(self) -> None:
         await self.bot.wait_until_ready()
 
 async def setup(bot: commands.Bot) -> None:

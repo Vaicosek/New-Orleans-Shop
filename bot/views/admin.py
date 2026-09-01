@@ -12,11 +12,12 @@ import secrets
 
 import discord
 
-from core import alerts, audit, auctions as auctions_core, catalog, db, loyalty, money, predictions, pricing
+from core import alerts, audit, auctions as auctions_core, catalog, db, land as land_core, loyalty, money, predictions, pricing
 
 from .. import addressing, loyalty_sync
 
 from . import auctions as auction_views
+from . import land as land_views
 from . import pickers
 from .. import layout
 from .. import permissions
@@ -496,6 +497,105 @@ class _VoidConfirmModal(discord.ui.Modal):
         )
 
 
+class _ListLandDetailsModal(discord.ui.Modal):
+    """Step 1 of 2: the plot itself, all free text -- there is no catalog
+    entry for land to pick from, unlike an item auction's lot. Split from
+    pricing into its own modal because Discord caps a modal at 5 fields and
+    name/description/location/min bid/min raise/buy-now/duration is 7."""
+
+    def __init__(self, config):
+        super().__init__(title="List land (1/2): details", timeout=300)
+        self.config = config
+        self.name = discord.ui.TextInput(label="Plot name", placeholder="e.g. Riverside Lot 4",
+                                          max_length=100)
+        self.description = discord.ui.TextInput(
+            label="Description", style=discord.TextStyle.paragraph, required=False,
+            placeholder="Size, features, anything a buyer should know", max_length=500)
+        self.location = discord.ui.TextInput(
+            label="Location", required=False, placeholder="e.g. spawn +200/-450", max_length=200)
+        for field in (self.name, self.description, self.location):
+            self.add_item(field)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        details = {
+            "name": str(self.name.value).strip(),
+            "description": str(self.description.value).strip(),
+            "location": str(self.location.value).strip(),
+        }
+        await interaction.response.send_modal(_ListLandPricingModal(details, self.config))
+
+
+class _ListLandPricingModal(discord.ui.Modal):
+    """Step 2 of 2: everything that is a quantity. Buy-now is optional --
+    left blank, the plot is bid-only, exactly like an item auction."""
+
+    def __init__(self, details: dict, config):
+        super().__init__(title=f"List land (2/2): {details['name']}"[:45], timeout=300)
+        self.details = details
+        self.config = config
+        self.min_bid = discord.ui.TextInput(label="Minimum bid (g)", placeholder="e.g. 500",
+                                             max_length=10)
+        self.min_increment = discord.ui.TextInput(
+            label="Minimum raise (g)", placeholder="e.g. 50", max_length=10)
+        self.buy_now = discord.ui.TextInput(
+            label="Buy-now price (g), optional", required=False,
+            placeholder="Leave blank for bid-only", max_length=10)
+        self.duration = discord.ui.TextInput(
+            label="Duration, in minutes", placeholder="e.g. 1440 (24h)", max_length=6)
+        for field in (self.min_bid, self.min_increment, self.buy_now, self.duration):
+            self.add_item(field)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        try:
+            min_bid = int(str(self.min_bid.value).strip())
+            min_increment = int(str(self.min_increment.value).strip())
+            duration_minutes = int(str(self.duration.value).strip())
+            buy_now_raw = str(self.buy_now.value).strip()
+            buy_now_price = int(buy_now_raw) if buy_now_raw else None
+        except ValueError:
+            await interaction.followup.send(
+                "Minimum bid, minimum raise, duration and buy-now (if given) must all be "
+                "whole numbers.", ephemeral=True)
+            return
+        try:
+            land_id = land_core.open_listing(
+                self.details["name"], self.details["description"], self.details["location"],
+                min_bid, min_increment, duration_minutes,
+                buy_now_price=buy_now_price, created_by=money.user(interaction.user.id),
+            )
+        except land_core.LandError as err:
+            await interaction.followup.send(f"Could not list that plot: {err}", ephemeral=True)
+            return
+
+        # Post the card BEFORE telling staff it's done -- same reasoning as
+        # _OpenAuctionModal: the listing already exists and is settleable
+        # even if the public card never posts.
+        channel = layout.channel(interaction.client, self.config, "channel:land")
+        post_note = ""
+        if channel is None:
+            post_note = (" Could not find the land channel to post a public card -- "
+                         "the listing still exists and will still settle on time.")
+        else:
+            try:
+                embed = land_views.build_land_embed(land_id)
+                posted = await channel.send(embed=embed, view=land_views.LandCardView())
+            except discord.HTTPException as err:
+                post_note = f" Could not post the public card ({err})."
+            else:
+                if posted is not None:
+                    land_core.set_message(land_id, str(channel.id), str(posted.id))
+                    post_note = " Posted in the land channel."
+
+        buy_now_note = f", buy now {money_text(buy_now_price)}" if buy_now_price else ""
+        await interaction.followup.send(
+            f"Listed \"{self.details['name']}\" (#{land_id}): minimum bid "
+            f"{money_text(min_bid)}{buy_now_note}, closes in {duration_minutes} "
+            f"minute(s).{post_note}",
+            ephemeral=True,
+        )
+
+
 class _OpenAuctionModal(discord.ui.Modal):
     """Duration, pieces, minimum bid and minimum raise are all free-text
     quantities -- the lot itself is already resolved by the item picker
@@ -587,6 +687,46 @@ class _VoidAuctionConfirmModal(discord.ui.Modal):
             return
         await interaction.followup.send(
             f"Voided auction #{self.auction['id']} ({self.auction['item_name']}).", ephemeral=True)
+
+
+class _VoidLandConfirmModal(discord.ui.Modal):
+    """Typed confirmation for an irreversible refund: the plot's own NAME
+    -- never the listing's id. Same shape as _VoidAuctionConfirmModal."""
+
+    def __init__(self, listing: dict, voider: str):
+        super().__init__(title="Confirm void", timeout=300)
+        self.listing = listing
+        self.voider = voider
+        self.confirm = discord.ui.TextInput(
+            label=f"Type the plot name: {listing['name']}"[:45],
+            placeholder="Type it exactly as shown above", max_length=100,
+        )
+        self.add_item(self.confirm)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        if str(self.confirm.value).strip().lower() != self.listing["name"].strip().lower():
+            await interaction.followup.send("Plot name didn't match \u00b7 void cancelled.",
+                                             ephemeral=True)
+            return
+        try:
+            land_core.void(self.listing["id"], actor=self.voider)
+        except (land_core.LandError, money.MoneyError) as err:
+            await interaction.followup.send(f"Could not void: {err}", ephemeral=True)
+            return
+        await interaction.followup.send(
+            f"Voided land listing #{self.listing['id']} ({self.listing['name']}).", ephemeral=True)
+
+
+class _VoidLandGate(discord.ui.View):
+    def __init__(self, listing: dict, voider: str) -> None:
+        super().__init__(timeout=120)
+        self.listing = listing
+        self.voider = voider
+
+    @discord.ui.button(label="Confirm void", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        await interaction.response.send_modal(_VoidLandConfirmModal(self.listing, self.voider))
 
 
 class AdminPanelView(_StaffGatedView):
@@ -950,6 +1090,33 @@ class AdminPanelView(_StaffGatedView):
         await interaction.response.send_message(
             "Pick a member to clear a forced rank for:",
             view=pickers.UserPickerView(self.owner_id, picked),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="List land", style=discord.ButtonStyle.primary, row=3)
+    async def list_land(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        await interaction.response.send_modal(_ListLandDetailsModal(self.config))
+
+    @discord.ui.button(label="Void land", style=discord.ButtonStyle.secondary, row=3)
+    async def void_land(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        listings = queries.list_open_land(limit=25)
+        options = [(f"{l['name']} (#{l['id']})"[:100], str(l["id"])) for l in listings]
+
+        async def picked(inter: discord.Interaction, land_id_str: str) -> None:
+            if land_id_str == "_none":
+                await inter.response.send_message("No listings to void.", ephemeral=True)
+                return
+            listing = queries.get_land_detail(int(land_id_str))
+            await inter.response.send_message(
+                f"Voiding \"{listing['name']}\" refunds the current bid in full. "
+                "This cannot be undone.",
+                view=_VoidLandGate(listing, money.user(inter.user.id)),
+                ephemeral=True,
+            )
+
+        await interaction.response.send_message(
+            "Pick a listing to void:",
+            view=pickers.OptionPickerView(self.owner_id, options, picked),
             ephemeral=True,
         )
 

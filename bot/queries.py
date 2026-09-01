@@ -181,6 +181,44 @@ def list_open_auctions(*, include_closed: bool = True, limit: int = 25) -> list[
     return [dict(r) for r in rows]
 
 
+def get_land_detail(land_id: int) -> Optional[dict[str, Any]]:
+    """One land listing plus its current leading bid (if any). Same shape
+    as `get_auction_detail` -- the leader is read the same way
+    core/land.py's `_leading_bid` reads it, so the card can never show a
+    different leader than the one settle() would actually pay."""
+    with db_in() as c:
+        row = c.execute("SELECT * FROM land_listings WHERE id = ?", (land_id,)).fetchone()
+        if row is None:
+            return None
+        d = dict(row)
+        leader = c.execute(
+            "SELECT subject, amount FROM land_bids "
+            "WHERE land_id = ? AND status = 'active' "
+            "ORDER BY amount DESC, id ASC LIMIT 1",
+            (land_id,),
+        ).fetchone()
+        d["leader_subject"] = leader["subject"] if leader else None
+        d["leader_amount"] = leader["amount"] if leader else None
+        d["bid_count"] = c.execute(
+            "SELECT COUNT(*) AS n FROM land_bids WHERE land_id = ?", (land_id,)
+        ).fetchone()["n"]
+    return d
+
+
+def list_open_land(*, include_closed: bool = True, limit: int = 25) -> list[dict[str, Any]]:
+    """Listings still reachable for staff action (voiding): open, and
+    closed-but-not-yet-swept. Same exclusion as `list_open_auctions`."""
+    statuses = ("open", "closed") if include_closed else ("open",)
+    placeholders = ",".join("?" for _ in statuses)
+    with db_in() as c:
+        rows = c.execute(
+            f"SELECT id, name FROM land_listings "
+            f"WHERE status IN ({placeholders}) ORDER BY created_at DESC LIMIT ?",
+            (*statuses, limit),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def list_paid_workers(order_id: int) -> list[str]:
     """Every distinct worker actually paid for `order_id` -- read after
     `orders.approve()` so the bot layer can sync each one's loyalty rank

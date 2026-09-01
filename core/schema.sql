@@ -286,6 +286,54 @@ CREATE TABLE IF NOT EXISTS auction_bids (
 );
 CREATE INDEX IF NOT EXISTS ix_auction_bids_auction ON auction_bids(auction_id, amount DESC);
 
+-- Land plot listings. Staff lists a plot by hand (name, description, a
+-- free-text location -- no chunk-claim-mod integration, no AI valuation:
+-- see CONTRACT.md section 11a) and buyers bid, exactly like `auctions`
+-- above, or settle it instantly with `buy_now_price` when one is set. Same
+-- money-only contract as auctions: this table never touches `stock` or
+-- `items` -- handing over the plot in-game is a staff task, same as an
+-- order's delivery or a won item auction's lot.
+CREATE TABLE IF NOT EXISTS land_listings (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    name            TEXT    NOT NULL,
+    description     TEXT    NOT NULL DEFAULT '',
+    location        TEXT    NOT NULL DEFAULT '',
+    min_bid         INTEGER NOT NULL CHECK (min_bid > 0),
+    min_increment   INTEGER NOT NULL CHECK (min_increment > 0),
+    buy_now_price   INTEGER CHECK (buy_now_price IS NULL OR buy_now_price >= min_bid),
+    status          TEXT    NOT NULL DEFAULT 'open'
+                            CHECK (status IN ('open', 'closed', 'settled', 'voided')),
+    winner          TEXT,
+    winning_amount  INTEGER CHECK (winning_amount IS NULL OR winning_amount >= 0),
+    settle_event    TEXT    UNIQUE,
+    created_by      TEXT    NOT NULL,
+    created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
+    closes_at       TEXT    NOT NULL,
+    settled_at      TEXT,
+    channel_id      TEXT,
+    message_id      TEXT,
+    CHECK ((winner IS NULL) = (winning_amount IS NULL))
+);
+CREATE INDEX IF NOT EXISTS ix_land_listings_open ON land_listings(status) WHERE status IN ('open', 'closed');
+-- A persistent card's button re-resolves its listing from the message it is on.
+CREATE INDEX IF NOT EXISTS ix_land_listings_message ON land_listings(message_id);
+
+-- At most one 'active' row per listing at any time -- same invariant as
+-- auction_bids, held the same way: bid() marks the previous leader
+-- 'outbid' (and releases its hold) in the SAME transaction that inserts
+-- the new leader.
+CREATE TABLE IF NOT EXISTS land_bids (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    land_id     INTEGER NOT NULL REFERENCES land_listings(id) ON DELETE CASCADE,
+    subject     TEXT    NOT NULL REFERENCES wallets(subject),
+    amount      INTEGER NOT NULL CHECK (amount > 0),
+    hold_id     TEXT    NOT NULL REFERENCES ledger_holds(id),
+    status      TEXT    NOT NULL DEFAULT 'active'
+                        CHECK (status IN ('active', 'outbid', 'won', 'refunded')),
+    placed_at   TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS ix_land_bids_land ON land_bids(land_id, amount DESC);
+
 -- ---------------------------------------------------------------- betting
 -- Discord only. No module under web/ may read anything below this line;
 -- tests/test_no_wagering_on_web.py fails the build if one does.

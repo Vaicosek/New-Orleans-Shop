@@ -30,6 +30,7 @@ from .views.alerts import AlertAckView
 from core import provision
 
 from .views.auctions import AuctionCardView
+from .views.land import LandCardView
 from .views.casino import RoundVerifyView
 from .views.orders import OrderCardView
 
@@ -49,7 +50,7 @@ COGS = (
 # Persistent views: registered once at boot with placeholder state. Every
 # callback on these re-resolves its subject from the message it fired on --
 # `self` here is never trusted for anything beyond "which view class".
-PERSISTENT_VIEWS = (OrderCardView, AlertAckView, RoundVerifyView, AuctionCardView)
+PERSISTENT_VIEWS = (OrderCardView, AlertAckView, RoundVerifyView, AuctionCardView, LandCardView)
 
 
 class NolaBot(commands.Bot):
