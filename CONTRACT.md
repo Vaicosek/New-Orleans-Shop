@@ -596,6 +596,7 @@ Three audiences, one shell.
 | `/help` | public | how the shop works, transcribed from this contract. Touches no database |
 | `/terms` | public | plain terms: gold has no real-world value, delivery is manual. No database |
 | `/me` | customer | Discord OAuth2. Own orders, balance, history, team |
+| `/banking` | customer | balance, held, loans owed with due dates, bonds held. Read-only -- money moves stay in Discord |
 | `/order` | customer | POST only. Opens a production/restock request -- the site's one write route |
 | `/ledger` | staff | internal: balances, orders, payouts, audit trail |
 | `/solvency` | staff | can the shop pay what it owes: assets against liabilities, and margin per item |
@@ -606,6 +607,19 @@ Auth is **OAuth2 only** (no `/website_login` code-mint path; that only makes sen
 with an existing bot). One cookie, one session store, and **one identity function** that every
 page resolves through. Staff is a Discord-ID allowlist, checked at the route, and the staff nav
 entry is omitted server-side rather than CSS-hidden.
+
+**Quantities are ordered in the unit the goods come in.** A customer picks pieces,
+stacks or barrels beside the number, and the unit DEFAULTS to the one the price is
+quoted in -- a log priced "1 g / stack of 64" opens at "1 stack", because asking for it
+in pieces makes the buyer redo the multiplication the price label already did, and a
+conversion is where a mis-order comes from. A barrel is `barrel_slots * stack_size`, the
+same formula `stock.capacity` is derived from, so it is the barrel the shop counts stock
+in rather than a second idea of one. Units that would mean the same count are not
+offered: an item that does not stack has no stack option, and one with a single-slot
+barrel has no barrel option. The conversion happens server-side from the CATALOG's stack
+and barrel sizes, never from anything the form posted, and the resulting piece count is
+capped at `MAX_ORDER_PIECES` -- the input's `max` is a client-side hint, and multiplying
+a barrel count by 3,456 makes overshooting easy.
 
 **The storefront is a grid, not a table** — each item shows a Minecraft item/block icon
 (bundled at `web/assets/icons/*.png`, inlined as a `data:` URI by `web/icons.py` so the page

@@ -81,7 +81,7 @@ ALLOWED_ROUTES = {
     # /inventory is the page's name; /stock is the name it had before the
     # owner renamed it and stays served so an already-pasted link keeps working.
     "/", "/inventory", "/stock", "/me", "/ledger", "/order",
-    "/auctions", "/land", "/orders", "/teams", "/history", "/help", "/terms", "/solvency",
+    "/auctions", "/land", "/orders", "/teams", "/history", "/help", "/terms", "/solvency", "/banking",
 }
 
 

@@ -71,16 +71,30 @@ def _cart_controls_html(item: dict) -> str:
     """
     item_id = item["id"]
     stack = int(item["stack_size"] or 1)
+    barrel_slots = int(item["barrel_slots"] or 0)
+    barrel = barrel_slots * stack          # a full barrel, in pieces
     quoted_per_stack = stack > 1 and int(item["price_unit_pieces"] or 0) == stack
     default_qty = 1 if quoted_per_stack else stack
+    default_unit = "stacks" if quoted_per_stack else "pieces"
 
+    # Three units, largest last, and only the ones that mean something for
+    # THIS item: an item that does not stack has no stack option, and one
+    # with a single-slot barrel has no barrel option -- a dropdown whose
+    # entries all mean the same count is a choice that isn't one.
+    # `barrel_slots * stack_size` is the same formula `stock.capacity` is
+    # derived from, so "a barrel" here is the barrel the shop actually
+    # counts stock in, not a second idea of one.
+    choices: list[tuple[str, str]] = []
     if stack > 1:
+        choices.append(("stacks", f"stacks of {stack:,}"))
+    choices.append(("pieces", "pieces"))
+    if barrel_slots > 1 and barrel > stack:
+        choices.append(("barrels", f"barrels of {barrel:,}"))
+
+    if len(choices) > 1:
         opts = "".join(
             f'<option value="{value}"{" selected" if value == default_unit else ""}>{label}</option>'
-            for value, label, default_unit in (
-                ("stacks", f"stacks of {stack}", "stacks" if quoted_per_stack else "pieces"),
-                ("pieces", "pieces", "stacks" if quoted_per_stack else "pieces"),
-            )
+            for value, label in choices
         )
         unit_html = (f'<label class="unit-field"><span class="vis-hidden">Unit</span>'
                      f'<select name="unit_{item_id}" aria-label="Unit">{opts}</select></label>')
@@ -240,7 +254,7 @@ async def inventory(request: web.Request) -> web.Response:
 MAX_ORDER_PIECES = 999_999
 
 
-def _resolve_pieces(form, item_id: int, stack_size: int) -> int:
+def _resolve_pieces(form, item_id: int, stack_size: int, barrel_slots: int = 0) -> int:
     """A checked item's quantity in PIECES -- the number typed, converted
     from whatever unit the visitor picked beside it.
 
@@ -262,10 +276,19 @@ def _resolve_pieces(form, item_id: int, stack_size: int) -> int:
         raise ValueError("quantity must be positive")
 
     unit = str(form.get(f"unit_{item_id}", "pieces")).strip().lower() or "pieces"
-    if unit not in ("pieces", "stacks"):
+    if unit not in ("pieces", "stacks", "barrels"):
         raise ValueError(f"unknown unit {unit!r}")
 
-    pieces = count * max(int(stack_size or 1), 1) if unit == "stacks" else count
+    stack = max(int(stack_size or 1), 1)
+    if unit == "stacks":
+        pieces = count * stack
+    elif unit == "barrels":
+        # The barrel the shop counts stock in: barrel_slots * stack_size,
+        # the same formula behind `stock.capacity`.
+        slots = max(int(barrel_slots or 1), 1)
+        pieces = count * slots * stack
+    else:
+        pieces = count
     if pieces > MAX_ORDER_PIECES:
         raise ValueError(f"{pieces} pieces is over the {MAX_ORDER_PIECES} maximum")
     return pieces
@@ -303,7 +326,8 @@ async def order_item(request: web.Request) -> web.Response:
             failed += 1
             continue
         try:
-            pieces = _resolve_pieces(form, item_id, item["stack_size"])
+            pieces = _resolve_pieces(form, item_id, item["stack_size"],
+                                      item["barrel_slots"])
         except ValueError:
             failed += 1
             continue

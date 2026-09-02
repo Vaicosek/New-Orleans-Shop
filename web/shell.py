@@ -49,6 +49,7 @@ NAV: list[tuple[str, str, str]] = [
     ("Teams", "/teams", "teams"),
     ("History", "/history", "history"),
     ("Hub", "/me", "account"),
+    ("Banking", "/banking", "banking"),
     ("Help", "/help", "help"),
 ]
 #: Staff-only nav entries, appended for a staff identity and rendered by

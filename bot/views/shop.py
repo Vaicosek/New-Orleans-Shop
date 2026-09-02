@@ -104,13 +104,16 @@ class _QuantityModal(discord.ui.Modal):
         self.channel_id = channel_id
         stack = int(item.get("stack_size") or 1)
         self.stack_size = stack
+        self.barrel_slots = int(item.get("barrel_slots") or 0)
+        self.barrel_pieces = self.barrel_slots * stack
         # A modal may only hold text inputs -- no dropdown -- so the unit
         # rides in the field itself rather than costing a whole extra
         # picker step ahead of the modal. Goods here are quoted per stack
         # ("1 g / stack of 64"), and making somebody multiply that out to
         # order is where a mis-order comes from.
         if stack > 1:
-            label, placeholder = "How many? (pieces, or '3 stacks')", f"e.g. 64 or 3 stacks"
+            label = "How many? (pieces, stacks or barrels)"
+            placeholder = f"e.g. 64, or 3 stacks, or 1 barrel ({self.barrel_pieces:,})"
         else:
             label, placeholder = "How many pieces?", "e.g. 64"
         self.pieces = discord.ui.TextInput(
@@ -130,29 +133,39 @@ class _QuantityModal(discord.ui.Modal):
         caller can say so plainly rather than silently ordering pieces.
         """
         text = " ".join(str(raw).strip().lower().split())
-        in_stacks = False
-        for suffix in ("stacks", "stack", "st", "s"):
+        unit = "pieces"
+        # Longest suffixes first: "barrels" must be tested before "b", and
+        # "stacks" before "s", or "3 barrels" parses as 3 somethings-else.
+        for suffix, found in (("barrels", "barrels"), ("barrel", "barrels"),
+                               ("stacks", "stacks"), ("stack", "stacks"),
+                               ("st", "stacks"), ("b", "barrels"), ("s", "stacks")):
             if text.endswith(suffix):
                 head = text[: -len(suffix)].strip()
                 if head:
-                    text, in_stacks = head, True
+                    text, unit = head, found
                     break
         count = int(text)
         if count <= 0:
             raise ValueError("quantity must be positive")
-        if not in_stacks:
+        if unit == "pieces":
             return count, f"{count:,} pieces"
-        if self.stack_size <= 1:
-            raise ValueError(f"{self.item['name']} does not come in stacks")
-        pieces = count * self.stack_size
-        return pieces, f"{count:,} stack{'s' if count != 1 else ''} ({pieces:,} pieces)"
+        if unit == "stacks":
+            if self.stack_size <= 1:
+                raise ValueError(f"{self.item['name']} does not come in stacks")
+            pieces = count * self.stack_size
+            return pieces, f"{count:,} stack{'s' if count != 1 else ''} ({pieces:,} pieces)"
+        if self.barrel_pieces <= 1:
+            raise ValueError(f"{self.item['name']} has no barrel size on record")
+        pieces = count * self.barrel_pieces
+        return pieces, f"{count:,} barrel{'s' if count != 1 else ''} ({pieces:,} pieces)"
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
         try:
             pieces, asked_for = self._parse_quantity(self.pieces.value)
         except ValueError as err:
-            hint = (" You can type a piece count, or a stack count like \"3 stacks\"."
+            hint = (" You can type a piece count, a stack count like \"3 stacks\", "
+                    "or a barrel count like \"1 barrel\"."
                     if self.stack_size > 1 else "")
             detail = str(err) if str(err) and "invalid literal" not in str(err) else ""
             await interaction.followup.send(

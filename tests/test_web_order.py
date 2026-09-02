@@ -148,6 +148,60 @@ async def main() -> None:
         by_item = {row["item_id"]: row for row in rows}
         check("the Oak Log order requests the default stack quantity",
               by_item[oak_id]["requested_pieces"] == 64)
+
+        # -- [3b] the unit beside the quantity ------------------------------
+        # Ordering "3" of something quoted per stack has to mean three
+        # STACKS if that is what the dropdown says, or a customer who picks
+        # a unit gets silently given pieces -- and the shop delivers 3 logs
+        # where 192 were wanted. barrel_slots * stack_size is the same
+        # formula stock.capacity uses, so a barrel here is the barrel the
+        # shop counts stock in.
+        check("the storefront offers all three units for a stacking item",
+              'value="stacks"' in text and 'value="pieces"' in text
+              and 'value="barrels"' in text)
+
+        for unit, qty, expected, why in (
+            ("stacks", "3", 192, "3 stacks of 64"),
+            ("barrels", "1", 3456, "1 barrel of 54x64"),
+            ("pieces", "5", 5, "5 pieces"),
+        ):
+            before = order_count()
+            r = await client.post(
+                "/order",
+                data={"csrf": real_csrf, "items": str(oak_id),
+                      f"qty_{oak_id}": qty, f"unit_{oak_id}": unit},
+                allow_redirects=False,
+            )
+            with db.db() as c:
+                row = c.execute("SELECT requested_pieces FROM orders "
+                                 "ORDER BY id DESC LIMIT 1").fetchone()
+            check(f"ordering {why} opens an order for {expected:,} pieces",
+                  r.status in (302, 303) and order_count() == before + 1
+                  and row["requested_pieces"] == expected,
+                  f"got {dict(row) if row else None}")
+
+        # A unit the form never offered is a tampered post, not a typo.
+        before = order_count()
+        r = await client.post(
+            "/order",
+            data={"csrf": real_csrf, "items": str(oak_id),
+                  f"qty_{oak_id}": "1", f"unit_{oak_id}": "crates"},
+            allow_redirects=False,
+        )
+        check("a unit the form never offered opens no order",
+              order_count() == before, f"count went {before} -> {order_count()}")
+
+        # The cap is enforced server-side: max= on the input is a hint the
+        # form can be posted without.
+        before = order_count()
+        r = await client.post(
+            "/order",
+            data={"csrf": real_csrf, "items": str(oak_id),
+                  f"qty_{oak_id}": "500", f"unit_{oak_id}": "barrels"},
+            allow_redirects=False,
+        )
+        check("500 barrels (1.7M pieces) is refused by the server-side cap",
+              order_count() == before, f"count went {before} -> {order_count()}")
         check("the Birch Log order requests the typed quantity",
               by_item[birch_id]["requested_pieces"] == 200)
         check("both orders are attributed to the signed-in customer, not a guessed subject",

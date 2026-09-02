@@ -27,6 +27,7 @@ PAGE_MODULES: list[tuple[str, list[str]]] = [
     ("web.pages.history", ["/history"]),
     ("web.pages.info", ["/help", "/terms"]),
     ("web.pages.account", ["/me"]),
+    ("web.pages.banking", ["/banking"]),
     ("web.pages.ledger", ["/ledger"]),
     ("web.pages.solvency", ["/solvency"]),
 ]
