@@ -26,6 +26,8 @@ from aiohttp import web
 from core import teams as core_teams
 
 from ..auth import resolve_identity
+from core.pricing import money_text
+
 from ..shell import esc, page
 
 
@@ -59,22 +61,23 @@ def _member_count_text(count: int) -> str:
     return "1 member" if count == 1 else f"{count:,} members"
 
 
-def _sorted_teams(rows: list[dict]) -> list[dict]:
-    """`list_teams()` hands back insertion order (newest first), which is
-    useful to a join picker and useless to a reader. A directory is read
-    largest-first -- the busiest teams are the ones a visitor is looking
-    for -- with names alphabetical inside each size so the order is stable
-    and a team never appears to move between refreshes."""
-    return sorted(
-        rows,
-        key=lambda t: (-int(t.get("member_count") or 0), str(t.get("name") or "").lower()),
-    )
+def _standings() -> list[dict]:
+    """Teams ranked by gold actually paid to their people for completed
+    work, which is what `core.teams.leaderboard()` derives live from
+    `order_claims` -- not by roster size, and never from a stored counter.
+
+    Ranking rather than listing is the point: teams here exist to compete.
+    Size sorted the directory before there was anything real to sort on;
+    now there is."""
+    return core_teams.leaderboard()
 
 
-def _team_block(team: dict, members: list[str], roster_readable: bool) -> str:
+def _team_block(team: dict, members: list[str], roster_readable: bool,
+                 rank: int | None = None) -> str:
     count = int(team.get("member_count") or 0)
     manager = _short_id(team.get("manager"))
     formed = _formed_text(team.get("created_at"))
+    works = ", ".join(core_teams.focus(int(team["id"]))) or "everything"
 
     if not roster_readable:
         # The team row read fine but its roster did not. "We could not read
@@ -89,10 +92,21 @@ def _team_block(team: dict, members: list[str], roster_readable: bool) -> str:
         f'<div class="row"><span>Formed</span><span>{esc(formed)}</span></div>'
         if formed else ""
     )
-    return f"""<h2>{esc(team.get("name") or "Unnamed team")}</h2>
+    orders_done = int(team.get("orders") or 0)
+    paid_row = (
+        f'<div class="row"><span>Paid for work</span>'
+        f'<span class="num">{esc(money_text(int(team.get("paid") or 0)))} '
+        f'&middot; {orders_done} order{"s" if orders_done != 1 else ""}</span></div>'
+        if orders_done else ""
+    )
+    heading = f'{rank}. {team.get("name") or "Unnamed team"}' if rank else (
+        team.get("name") or "Unnamed team")
+    return f"""<h2>{esc(heading)}</h2>
 <div class="sums">
 <div class="row"><span>Manager</span><span>{esc(manager)}</span></div>
+<div class="row"><span>Works</span><span>{esc(works)}</span></div>
 <div class="row"><span>Size</span><span>{esc(_member_count_text(count))}</span></div>
+{paid_row}
 <div class="row"><span>Roster</span><span>{names}</span></div>
 {formed_row}
 </div>"""
@@ -104,7 +118,7 @@ async def teams(request: web.Request) -> web.Response:
     read_failed = False
     rows: list[dict] = []
     try:
-        rows = core_teams.list_teams()
+        rows = _standings()
     except Exception:  # noqa: BLE001 -- the page still renders without the list
         read_failed = True
 
@@ -116,16 +130,16 @@ async def teams(request: web.Request) -> web.Response:
         listing = '<p class="empty">No teams yet.</p>'
         summary = ""
     else:
-        ordered = _sorted_teams(rows)
+        ordered = rows
         blocks = []
-        for team in ordered:
+        for rank, team in enumerate(ordered, 1):
             members: list[str] = []
             roster_readable = True
             try:
                 members = core_teams.roster(int(team["id"]))
             except Exception:  # noqa: BLE001 -- one bad roster, not a dead page
                 roster_readable = False
-            blocks.append(_team_block(team, members, roster_readable))
+            blocks.append(_team_block(team, members, roster_readable, rank))
         listing = "".join(blocks)
         total_members = sum(int(t.get("member_count") or 0) for t in ordered)
         teams_word = "1 team" if len(ordered) == 1 else f"{len(ordered):,} teams"
@@ -136,7 +150,8 @@ async def teams(request: web.Request) -> web.Response:
 <div class="hero">
 <h1>Teams</h1>
 <p>Every team working out of New Orleans, who manages it and who is on it.
-Joining, leaving and roster changes happen on the <code>/team</code> command in
+Ranked by the gold actually paid to their people for completed work. Joining, leaving,
+roster changes and what a team works on all happen on the <code>/team</code> command in
 Discord &mdash; this page only shows what is there.</p>
 </div>
 {summary}

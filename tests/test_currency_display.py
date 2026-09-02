@@ -120,9 +120,14 @@ shop_src = (ROOT / "bot" / "views" / "shop.py").read_text()
 check("shop.py no longer hardcodes the currency symbol in display text",
       not re.search(r"""[,:][^"'\n]*\}\s*g\b""", shop_src),
       "found a literal ' g' next to a formatted number")
-check("shop.py renders the order total through money_text",
-      "money_text(quote['total_coins'])" in shop_src
-      or 'money_text(quote["total_coins"])' in shop_src)
+# The guard is that the figure goes through the formatter, not which figure
+# it is: the confirmation now quotes the SELL price via quote['price_label']
+# and the WORKER PAYOUT via money_text(_payout_total(...)), because an order
+# card promising the sell price pays 70% of it (CONTRACT.md 11d).
+check("shop.py renders the order's money figure through money_text",
+      re.search(r"money_text\(", shop_src) is not None)
+check("shop.py states what the order actually PAYS, not only what it sells for",
+      "_payout_total(" in shop_src)
 check("shop.py imports money_text from ..ui.embed",
       re.search(r"from \.\.ui\.embed import [^\n]*\bmoney_text\b", shop_src) is not None)
 check("shop.py does not format the total as a bare number",

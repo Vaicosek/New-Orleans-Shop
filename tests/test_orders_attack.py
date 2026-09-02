@@ -109,10 +109,15 @@ for t in threads:
 oks = [r for r in results if r[0] == "ok"]
 check("exactly one of six racing approve() calls actually paid",
       len(oks) == 1, f"results={results}")
-check("worker1 was credited exactly once (640), not more",
-      money.balance("u:worker1").coins == 640, f"got {money.balance('u:worker1').coins}")
+# Credited at the PAYOUT rate, not the sell price -- the shop keeps a
+# margin (CONTRACT.md 11d). What this attack guards is "exactly once",
+# which the rate change does not touch.
+_PAY_640 = charge(64, orders.worker_payout_for(640), 64)
+check("worker1 was credited exactly once, not more",
+      money.balance("u:worker1").coins == _PAY_640,
+      f"got {money.balance('u:worker1').coins}, wanted {_PAY_640}")
 claims = orders.list_claims(order_id)
-check("the claim shows exactly one paid_event", claims[0]["paid_coins"] == 640)
+check("the claim shows exactly one paid_event", claims[0]["paid_coins"] == _PAY_640)
 
 
 # Attack 1b: approve a partially-paid order (one claim already paid via a
@@ -134,7 +139,10 @@ orders.mark_fulfilled(order_id, "u:worker2", 8)
 # awaiting_verification (simulating a crash between the claim UPDATE and the
 # final "SET status='fulfilled'").
 with db.db() as c:
-    amt = charge(12, 128, 64)
+    # The simulation must pay what approve() itself would have paid --
+    # the payout rate, not the sell price -- or the 'crashed halfway'
+    # state it is recreating is one approve() could never produce.
+    amt = charge(12, orders.worker_payout_for(128), 64)
     evt = money.new_event_id("payout")
     c.execute("UPDATE order_claims SET paid_event = ?, paid_coins = ? "
               "WHERE order_id = ? AND worker = ?", (evt, amt, order_id, "u:worker1"))
@@ -146,12 +154,12 @@ check("order is still awaiting_verification after the simulated crash",
 
 result = orders.approve(order_id, "u:manager")
 check("retry only pays the outstanding claim (worker2's amount), not worker1's again",
-      result["paid_coins"] == charge(8, 128, 64), f"got {result}")
+      result["paid_coins"] == charge(8, orders.worker_payout_for(128), 64), f"got {result}")
 check("worker1's balance is unchanged by the retry (no double pay)",
-      money.balance("u:worker1").coins == charge(12, 128, 64),
+      money.balance("u:worker1").coins == charge(12, orders.worker_payout_for(128), 64),
       f"got {money.balance('u:worker1').coins}")
 check("worker2 got paid on the retry",
-      money.balance("u:worker2").coins == charge(8, 128, 64),
+      money.balance("u:worker2").coins == charge(8, orders.worker_payout_for(128), 64),
       f"got {money.balance('u:worker2').coins}")
 check("order is now fulfilled", orders.get_order(order_id)["status"] == "fulfilled")
 
@@ -195,14 +203,17 @@ check("no claim carries a paid_event after the rollback",
 with db.db() as c:
     c.execute("UPDATE wallets SET coins = 1000000 WHERE subject = 'treasury:shop'")
 result2 = orders.approve(order_id, "u:manager")
+_PAY_3 = charge(64, orders.worker_payout_for(300), 64)
+_EACH = _PAY_3 // 3
 check("retry after refunding treasury pays all three claims",
-      result2["paid_claims"] == 3 and result2["paid_coins"] == 300, f"{result2}")
-check("worker1 paid exactly once total (100, not 200)",
-      money.balance("u:worker1").coins == 100)
-check("worker2 paid exactly once total (100, not 200)",
-      money.balance("u:worker2").coins == 100)
-check("worker3 paid exactly once total (100, not 200)",
-      money.balance("u:worker3").coins == 100)
+      result2["paid_claims"] == 3 and result2["paid_coins"] == _PAY_3, f"{result2}")
+check("worker1 paid exactly once total, never twice",
+      money.balance("u:worker1").coins == _EACH,
+      f"got {money.balance('u:worker1').coins}, wanted {_EACH}")
+check("worker2 paid exactly once total, never twice",
+      money.balance("u:worker2").coins == _EACH)
+check("worker3 paid exactly once total, never twice",
+      money.balance("u:worker3").coins == _EACH)
 
 
 # ================================================================== Attack 3
@@ -218,8 +229,12 @@ print("\nattack 3: fragmenting a 64-piece order across many claimants must "
 reset()
 seed_treasury()
 price, stack = 300, 64
-single_total = charge(64, price, stack)
-check("sanity: charge(64, 300, 64) is the textbook 300", single_total == 300)
+# Compared at the PAYOUT rate, which is what approve() actually pays.
+# The exploit this guards is about the SPLIT, not the rate: 64 pieces
+# must cost the shop the same whether claimed once or sixty-four times.
+single_total = charge(64, orders.worker_payout_for(price), stack)
+check("sanity: one claim of 64 costs charge(64, payout_rate, 64)",
+      single_total == charge(64, orders.worker_payout_for(300), 64))
 
 item_id = make_item("Diamond", price=price, stack=stack)
 order_id = orders.create_order(item_id, 64, created_by="u:owner")
@@ -263,7 +278,7 @@ orders.mark_fulfilled(order_id, "u:worker1", 64)
 catalog.update_item(item_id, price_coins=999999, price_unit_pieces=1, stack_size=1)
 result = orders.approve(order_id, "u:manager")
 check("approve() charged the SNAPSHOTTED price/stack (200/64), not the new one",
-      result["paid_coins"] == 200, f"got {result}")
+      result["paid_coins"] == charge(64, orders.worker_payout_for(200), 64), f"got {result}")
 
 # Cancel -> reprice -> approve must be refused (no path from cancelled to paid).
 item2 = make_item("Emerald2", price=200, stack=64)
@@ -325,7 +340,7 @@ orders.mark_fulfilled(order_id, "u:worker1", 64)
 catalog.update_item(item_id, price_coins=0)                # reprice to 0 mid-flight
 result = orders.approve(order_id, "u:manager")
 check("a post-snapshot reprice to 0 does NOT zero the payout (uses the snapshot)",
-      result["paid_coins"] == 500, f"got {result}")
+      result["paid_coins"] == charge(64, orders.worker_payout_for(500), 64), f"got {result}")
 
 item2 = make_item("Netherite2", price=500, stack=64)
 order2 = orders.create_order(item2, 64, created_by="u:owner")
@@ -334,7 +349,7 @@ orders.mark_fulfilled(order2, "u:worker2", 64)
 catalog.deactivate_item(item2)                              # deactivate mid-flight
 result2 = orders.approve(order2, "u:manager")
 check("deactivating the item mid-flight does not silently skip/zero the payout",
-      result2["paid_coins"] == 500, f"got {result2}")
+      result2["paid_coins"] == charge(64, orders.worker_payout_for(500), 64), f"got {result2}")
 
 
 # ================================================================== Attack 7
@@ -424,9 +439,9 @@ check("reprice() did NOT close or otherwise move the order",
       repriced["status"] == "awaiting_verification", f"got {repriced['status']}")
 res8b = orders.approve(dead2, "u:manager")
 check("EXIT 2: the repriced order paid the delivered work (300)",
-      res8b["paid_coins"] == 300, f"got {res8b}")
+      res8b["paid_coins"] == charge(64, orders.worker_payout_for(300), 64), f"got {res8b}")
 check("the worker actually received the 300",
-      money.balance("u:worker1").coins == 300,
+      money.balance("u:worker1").coins == charge(64, orders.worker_payout_for(300), 64),
       f"got {money.balance('u:worker1').coins}")
 with db.db() as c:
     rrow = c.execute("SELECT * FROM audit_actions WHERE kind = 'order.reprice' "
@@ -469,7 +484,8 @@ check("nobody was credited 0 coins in the ledger",
 orders.reprice(dead3, 100, 1, actor="u:manager")
 res8c = orders.approve(dead3, "u:manager")
 check("EXIT: after a reprice the same order pays real coins (100)",
-      res8c["paid_coins"] == 100 and money.balance("u:worker1").coins == 100,
+      res8c["paid_coins"] == charge(64, orders.worker_payout_for(100), 64)
+      and money.balance("u:worker1").coins == charge(64, orders.worker_payout_for(100), 64),
       f"got {res8c}")
 
 

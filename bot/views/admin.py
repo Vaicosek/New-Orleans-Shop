@@ -12,7 +12,7 @@ import secrets
 
 import discord
 
-from core import alerts, audit, auctions as auctions_core, bonds as bonds_core, catalog, db, land as land_core, loans as loans_core, loyalty, money, predictions, pricing
+from core import alerts, audit, auctions as auctions_core, bonds as bonds_core, catalog, db, land as land_core, loans as loans_core, loyalty, money, orders as orders_core, predictions, pricing
 
 from .. import addressing, loyalty_sync
 
@@ -890,6 +890,105 @@ class _WriteOffLoanGate(discord.ui.View):
             f"Wrote off loan #{self.loan['id']} ({self.loan['subject']}).", ephemeral=True)
 
 
+class _MarginModal(discord.ui.Modal):
+    """What share of an item's sell price a worker is paid.
+
+    The shop's margin is the remainder, and it is a business number rather
+    than an engineering one -- on a host with no shell, changing it in code
+    means a push and a panel pull, so it lives in `config` and is set here.
+
+    Existing orders are NOT affected: every order snapshots its own rate at
+    creation, so a change here decides what NEW orders pay and can never
+    reprice work somebody already claimed.
+    """
+
+    def __init__(self) -> None:
+        current = orders_core.payout_pct()
+        super().__init__(title="Worker share of the sell price", timeout=300)
+        self.pct = discord.ui.TextInput(
+            label="Worker share, in percent",
+            placeholder=f"currently {current} -- the shop keeps {100 - current}%",
+            max_length=3, required=True,
+        )
+        self.add_item(self.pct)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        try:
+            value = int(str(self.pct.value).strip())
+        except ValueError:
+            await interaction.followup.send(
+                "That needs to be a whole number of percent.", ephemeral=True)
+            return
+        if not 1 <= value <= 100:
+            await interaction.followup.send(
+                "The worker share has to be between 1 and 100 percent. A share of 0 "
+                "pays nothing and leaves delivered work unpayable.", ephemeral=True)
+            return
+        # A top-rank bonus and a manager override both land ON TOP of the
+        # worker's figure, so a share this high costs more than the sale
+        # that funds it. Say so with the real arithmetic rather than
+        # refusing a number that is legal.
+        warning = ""
+        if value > 85:
+            loaded = value * 112 // 100
+            loaded += loaded * 5 // 100
+            if loaded >= 100:
+                warning = (f" Careful: at {value}%, an order worked by a top-rank member "
+                            f"of a team costs about {loaded}% of the sale once their bonus "
+                            f"and the manager's cut land on top -- the shop loses money on it.")
+        db.set_config(orders_core.PAYOUT_PCT_KEY, str(value))
+        await interaction.followup.send(
+            f"Workers are now paid {value}% of the sell price; the shop keeps "
+            f"{100 - value}%. Orders already open keep the rate they were opened "
+            f"at.{warning}", ephemeral=True)
+
+
+class _CategoryModal(discord.ui.Modal):
+    """Name, sort order, note. All three are genuinely free text -- a
+    category has no id to pick from, and creating one is the point -- so
+    this is a modal rather than a picker, unlike every flow that keys on an
+    item or an order. `upsert_category` is an upsert, so typing an existing
+    name renumbers or re-notes it rather than failing."""
+
+    def __init__(self) -> None:
+        super().__init__(title="Category", timeout=300)
+        self.name = discord.ui.TextInput(
+            label="Category name", placeholder="e.g. Brewing", max_length=40, required=True)
+        self.sort_order = discord.ui.TextInput(
+            label="Sort order (lower shows first)", placeholder="e.g. 40",
+            max_length=5, required=True)
+        self.note = discord.ui.TextInput(
+            label="Note (optional)", placeholder="What belongs in it",
+            max_length=200, required=False)
+        for field in (self.name, self.sort_order, self.note):
+            self.add_item(field)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        name = str(self.name.value).strip()
+        if not name:
+            await interaction.followup.send("A category needs a name.", ephemeral=True)
+            return
+        try:
+            sort_order = int(str(self.sort_order.value).strip())
+        except ValueError:
+            await interaction.followup.send(
+                "Sort order must be a whole number.", ephemeral=True)
+            return
+        existed = any(c["name"].lower() == name.lower()
+                      for c in catalog.list_categories())
+        try:
+            catalog.upsert_category(name, sort_order,
+                                     note=str(self.note.value).strip() or None)
+        except Exception as err:  # noqa: BLE001 -- refuse, don't half-apply
+            await interaction.followup.send(f"Could not save that: {err}", ephemeral=True)
+            return
+        await interaction.followup.send(
+            f"{'Updated' if existed else 'Created'} category **{name}** "
+            f"at sort order {sort_order}.", ephemeral=True)
+
+
 class AdminPanelView(_StaffGatedView):
     @discord.ui.button(label="Add item", style=discord.ButtonStyle.primary)
     async def add_item(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
@@ -939,6 +1038,26 @@ class AdminPanelView(_StaffGatedView):
             view=pickers.ItemPickerView(self.owner_id, picked, active_only=False),
             ephemeral=True,
         )
+
+    @discord.ui.button(label="Margin", style=discord.ButtonStyle.secondary)
+    async def margin(self, interaction: discord.Interaction,
+                      _button: discord.ui.Button) -> None:
+        await interaction.response.send_modal(_MarginModal())
+
+    @discord.ui.button(label="Categories", style=discord.ButtonStyle.secondary)
+    async def categories(self, interaction: discord.Interaction,
+                          _button: discord.ui.Button) -> None:
+        """Create a category, or renumber one that exists.
+
+        `catalog.upsert_category` shipped with exactly one caller --
+        `seed_catalog.py`, which needs a shell the host does not provide --
+        so on the live server a category could only ever be one the seed
+        happened to include. That is now load-bearing: a team declares the
+        categories it works (CONTRACT.md 11d), and an order reaches the
+        right crew by matching them, so "we sell a new kind of thing" had
+        no way to become "this crew handles it".
+        """
+        await interaction.response.send_modal(_CategoryModal())
 
     @discord.ui.button(label="Set threshold", style=discord.ButtonStyle.secondary)
     async def threshold(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:

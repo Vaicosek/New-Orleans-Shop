@@ -95,7 +95,11 @@ def build_order_embed(order_id: int) -> discord.Embed:
     if order is None:
         return panel_embed("Order not found", "This order no longer exists.", tone="loss")
     claims = orders_core.list_claims(order_id)
-    label = price_label(order["price_coins"], order["price_unit_pieces"], order["stack_size"])
+    # What this order PAYS, not what the shop sells the goods for. A worker
+    # deciding whether to claim has to read the figure they will actually
+    # receive; showing the sell price here would promise 320 and pay 224.
+    label = price_label(order["payout_coins"] or order["price_coins"],
+                        order["price_unit_pieces"], order["stack_size"])
     claim_lines = [
         f"{worker_mention(c['worker'])} {SEP} claimed {c['pieces']}, delivered {c['delivered']}"
         + (f" (paid {money_text(c['paid_coins'])})" if c["paid_coins"] else "")
@@ -315,7 +319,8 @@ class OrderCardView(discord.ui.View):
         except (orders_core.OrderError, money.MoneyError) as err:
             await interaction.followup.send(f"Could not approve: {err}", ephemeral=True)
             return
-        label = price_label(order["price_coins"], order["price_unit_pieces"], order["stack_size"])
+        label = price_label(order["payout_coins"] or order["price_coins"],
+                            order["price_unit_pieces"], order["stack_size"])
         breakdown = "\n".join(
             f"  {SEP} {worker_mention(cl['worker'])}: {cl['delivered_pieces']} piece(s) {SEP} {money_text(cl['amount'])}"
             for cl in preview["per_claim"]
@@ -471,7 +476,8 @@ class OrdersPanelView(discord.ui.View):
             except (orders_core.OrderError, money.MoneyError) as err:
                 await inter.response.send_message(f"Could not approve: {err}", ephemeral=True)
                 return
-            label = price_label(order["price_coins"], order["price_unit_pieces"], order["stack_size"])
+            label = price_label(order["payout_coins"] or order["price_coins"],
+                            order["price_unit_pieces"], order["stack_size"])
             breakdown = "\n".join(
                 f"  {SEP} {worker_mention(cl['worker'])}: {cl['delivered_pieces']} piece(s) {SEP} {money_text(cl['amount'])}"
                 for cl in preview["per_claim"]
@@ -572,7 +578,8 @@ class _RepriceModal(discord.ui.Modal):
         except orders_core.OrderError as err:
             await interaction.followup.send(f"Could not reprice: {err}", ephemeral=True)
             return
-        label = price_label(order["price_coins"], order["price_unit_pieces"], order["stack_size"])
+        label = price_label(order["payout_coins"] or order["price_coins"],
+                            order["price_unit_pieces"], order["stack_size"])
         await interaction.followup.send(
             f"Order #{self.order_id} repriced to {label}. It can be approved now.",
             ephemeral=True,

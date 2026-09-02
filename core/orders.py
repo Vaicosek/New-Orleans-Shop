@@ -27,8 +27,8 @@ from __future__ import annotations
 import sqlite3
 from typing import Any, Optional
 
-from . import audit, loyalty, money
-from .db import db_in
+from . import audit, loyalty, money, teams
+from .db import db_in, get_config
 from .money import normalise_subject
 from .pricing import CURRENCY, split_charge
 
@@ -103,6 +103,79 @@ def _row(r: sqlite3.Row) -> dict[str, Any]:
 
 # ------------------------------------------------------------------ lifecycle
 
+#: What a worker is paid, as a percent of the shop's sell price for the same
+#: quantity. The shop's margin is the remainder, and it has to be wide enough
+#: to survive what gets added on TOP of a payout: a top-rank loyalty bonus
+#: (12%) and a manager override (5%) compound onto the worker's figure, so at
+#: 70% the treasury still keeps roughly 18 of every 100 it charges. Set this
+#: above ~85 and a fully-loaded order costs more than the sale that funded it.
+WORKER_PAYOUT_PCT = 70
+
+
+#: The config key the live margin is stored under. `WORKER_PAYOUT_PCT` above
+#: is the DEFAULT, used when nothing has been set; the stored value wins.
+#: This is the shop's margin -- a business number the owner will want to move
+#: without an edit and a redeploy, on a host with no shell where a redeploy
+#: means a git push and a panel pull.
+PAYOUT_PCT_KEY = "worker_payout_pct"
+
+
+def payout_pct(*, conn: Optional[sqlite3.Connection] = None) -> int:
+    """The margin currently in force, from `config`, falling back to the
+    constant.
+
+    Bounded to 1..100 on read rather than trusted: this decides what leaves
+    the treasury on every approval, and a stored 0 would pay workers
+    nothing while a stored 500 would pay five times the sale price. A bad
+    value in a config row must degrade to the default, never to a payout.
+    """
+    # Best-effort by design. This is a PRICING helper: it is called from
+    # inside open transactions, from tests before `init_db` has created the
+    # config table, and from scripts with no database at all. None of those
+    # should raise -- a margin that cannot be read is the default margin,
+    # not a crash in the middle of opening somebody's order.
+    try:
+        raw = get_config(PAYOUT_PCT_KEY, conn=conn)
+    except sqlite3.Error:
+        return WORKER_PAYOUT_PCT
+    if raw is None:
+        return WORKER_PAYOUT_PCT
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return WORKER_PAYOUT_PCT
+    if not 1 <= value <= 100:
+        return WORKER_PAYOUT_PCT
+    return value
+
+
+def worker_payout_for(price_coins: int, *, pct: int | None = None,
+                       conn: Optional[sqlite3.Connection] = None) -> int:
+    """The payout rate to snapshot onto an order priced at `price_coins`.
+
+    Floor division, so rounding favours the treasury by at most one coin
+    per unit rather than against it -- the opposite bias compounds into a
+    real deficit across thousands of orders.
+
+    NEVER returns 0 for a priced item. At 70%, anything priced 1 floors to
+    0, and a zero payout rate is not "cheap work" -- `approve()` raises
+    ZeroPrice on it, so the order can never be paid and delivered work sits
+    stranded until staff notice and reprice it. Money is whole coins here,
+    so below about 2 there is simply no margin to take: the shop pays the
+    full 1 and takes nothing rather than breaking the order. A deliberate
+    floor, not a rounding accident.
+    """
+    price = int(price_coins)
+    if price <= 0:
+        return 0
+    # `conn` is passed DOWN, never re-opened: this is called from inside
+    # create_order's and reprice's open transaction, and a fresh db()
+    # there commits the caller's half-written work (core/db.py's own
+    # warning, earned twice).
+    rate = payout_pct(conn=conn) if pct is None else pct
+    return max(1, (price * rate) // 100)
+
+
 def create_order(item_id: int, requested_pieces: int, created_by: str, *,
                   channel_id: str | None = None, message_id: str | None = None,
                   conn: Optional[sqlite3.Connection] = None) -> int:
@@ -114,6 +187,15 @@ def create_order(item_id: int, requested_pieces: int, created_by: str, *,
     price that was live when it was opened. `approve()` reads
     `orders.price_coins`/`orders.price_unit_pieces`, never the item's live
     columns, for exactly this reason.
+
+    TWO prices are snapshotted, not one. `price_coins` is what the shop
+    SELLS at; `payout_coins` is what it PAYS a worker to produce the same
+    quantity, and the gap between them is the shop's margin. They were the
+    same number once, which meant every completed order paid out exactly
+    what it charged -- and once a loyalty bonus landed on top, more:
+    measured at 375 paid against a 320 sale. A shop that pays more for
+    goods than it sells them for drains its own treasury on every order it
+    completes, and no amount of funding fixes a per-unit loss.
     """
     requested_pieces = _positive_int(requested_pieces, "requested_pieces")
     created_by = normalise_subject(created_by)
@@ -126,11 +208,14 @@ def create_order(item_id: int, requested_pieces: int, created_by: str, *,
             raise NoSuchItem(f"no such item {item_id}")
         if not item["active"]:
             raise NoSuchItem(f"item {item_id} is not active")
+        payout_coins = worker_payout_for(item["price_coins"], conn=c)
         cur = c.execute(
-            "INSERT INTO orders (item_id, requested_pieces, price_coins, price_unit_pieces, "
-            "stack_size, created_by, channel_id, message_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (item_id, requested_pieces, item["price_coins"], item["price_unit_pieces"],
-             item["stack_size"], created_by, channel_id, message_id),
+            "INSERT INTO orders (item_id, requested_pieces, price_coins, payout_coins, "
+            "price_unit_pieces, stack_size, created_by, channel_id, message_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (item_id, requested_pieces, item["price_coins"], payout_coins,
+             item["price_unit_pieces"], item["stack_size"], created_by,
+             channel_id, message_id),
         )
         return cur.lastrowid
 
@@ -387,9 +472,15 @@ def reprice(order_id: int, price_coins: int, price_unit_pieces: int | None = Non
         before_price = order["price_coins"]
         before_unit = order["price_unit_pieces"]
         cur = c.execute(
-            "UPDATE orders SET price_coins = :p, price_unit_pieces = :u "
+            # payout_coins moves WITH the price. Repricing exists so a
+            # stuck order can finally be paid, and leaving the payout at
+            # the old snapshot would defeat exactly that: staff would fix
+            # the sell price, approve, and still pay the broken figure.
+            "UPDATE orders SET price_coins = :p, payout_coins = :pay, "
+            "                  price_unit_pieces = :u "
             " WHERE id = :oid AND status NOT IN ('fulfilled', 'cancelled')",
-            {"p": price_coins, "u": unit_pieces, "oid": order_id},
+            {"p": price_coins, "pay": worker_payout_for(price_coins, conn=c),
+             "u": unit_pieces, "oid": order_id},
         )
         if cur.rowcount != 1:                       # closed underneath us
             raise NotClaimable(
@@ -414,6 +505,53 @@ def reprice(order_id: int, price_coins: int, price_unit_pieces: int | None = Non
         )
         row = c.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
         return _row(row)
+
+
+def _payout_plan(c: sqlite3.Connection, claims, payouts) -> dict[str, Any]:
+    """What approving this order will actually cost the treasury, computed
+    once and used by BOTH `preview_approval` and `approve`.
+
+    It exists because those two drifted: `approve` added each worker's
+    loyalty bonus on top of the priced amount while `preview_approval`
+    returned the bare `sum(payouts)`, so the figure staff confirmed was
+    short by every bonus in the order -- 320 against a real 375 in the case
+    that found it. A preview whose docstring promises the exact figure has
+    to be computed by the same code that pays it, not by a second
+    implementation that agrees only until one of them changes.
+
+    Read-only: it decides amounts, never writes a row or moves a coin.
+    """
+    per_claim: list[dict[str, Any]] = []
+    overrides: dict[str, int] = {}
+    for cl, amount in zip(claims, payouts):
+        if amount <= 0:
+            continue                                      # nothing to pay for -- not an error
+        worker = normalise_subject(cl["worker"])
+        # The worker's CURRENT tier: this order's own payout must not
+        # retroactively rank them up before pricing itself.
+        bonus_pct = loyalty.payout_bonus_pct(worker, conn=c)
+        bonus = (amount * bonus_pct) // 100
+        total_amount = amount + bonus
+        per_claim.append({
+            "claim_id": cl["id"], "worker": worker,
+            "delivered_pieces": cl["delivered"], "amount": amount,
+            "bonus": bonus, "bonus_pct": bonus_pct, "total": total_amount,
+        })
+        manager = teams.manager_of(worker, conn=c)
+        if manager:
+            cut = (total_amount * teams.MANAGER_OVERRIDE_PCT) // 100
+            if cut > 0:
+                overrides[manager] = overrides.get(manager, 0) + cut
+
+    payout_total = sum(row["total"] for row in per_claim)
+    override_total = sum(overrides.values())
+    return {
+        "per_claim": per_claim,
+        "overrides": overrides,
+        "payout_total": payout_total,
+        "override_total": override_total,
+        "total_coins": payout_total + override_total,
+    }
 
 
 def preview_approval(order_id: int, approver: str, *,
@@ -449,7 +587,9 @@ def preview_approval(order_id: int, approver: str, *,
                 f"{approver} claimed or fulfilled order {order_id}; cannot approve their own order"
             )
 
-        price = order["price_coins"]
+        # The PAYOUT rate, not the sell price: `payout_coins` is what this
+        # order promised a worker when it was opened.
+        price = order["payout_coins"] or order["price_coins"]
         unit_pieces = order["price_unit_pieces"]
         if not price or price <= 0:
             raise ZeroPrice(
@@ -470,16 +610,19 @@ def preview_approval(order_id: int, approver: str, *,
                 f"piece(s); refusing to pay zero and close -- reprice or cancel it"
             )
 
-        per_claim = [
-            {"worker": normalise_subject(cl["worker"]), "delivered_pieces": cl["delivered"],
-             "amount": amount}
-            for cl, amount in zip(claims, payouts) if amount > 0
-        ]
+        plan = _payout_plan(c, claims, payouts)
+        # `total_coins` is what LEAVES THE TREASURY: every claim's priced
+        # amount, plus each worker's loyalty bonus, plus any manager
+        # override the order triggers. Staff confirm this number, so it is
+        # the whole cost or it is a lie.
         return {
             "order_id": order_id,
-            "total_coins": sum(payouts),
-            "paid_claims": len(per_claim),
-            "per_claim": per_claim,
+            "total_coins": plan["total_coins"],
+            "payout_coins": plan["payout_total"],
+            "override_coins": plan["override_total"],
+            "overrides": dict(plan["overrides"]),
+            "paid_claims": len(plan["per_claim"]),
+            "per_claim": plan["per_claim"],
         }
 
 
@@ -527,7 +670,11 @@ def approve(order_id: int, approver: str, *,
                 f"{approver} claimed or fulfilled order {order_id}; cannot approve their own order"
             )
 
-        price = order["price_coins"]
+        # The PAYOUT rate, not the sell price -- same source as
+        # preview_approval, so the two cannot disagree. `or price_coins`
+        # covers a row written before payout_coins existed whose backfill
+        # has not run, which pays the old way rather than paying nothing.
+        price = order["payout_coins"] or order["price_coins"]
         unit_pieces = order["price_unit_pieces"]
         if not price or price <= 0:
             raise ZeroPrice(
@@ -565,31 +712,28 @@ def approve(order_id: int, approver: str, *,
                 f"piece(s); refusing to pay zero and close -- reprice or cancel it"
             )
 
+        # The SAME plan `preview_approval` showed staff -- amounts, loyalty
+        # bonuses and manager overrides all decided in one place, so the
+        # figure confirmed and the figure paid cannot drift apart.
+        plan = _payout_plan(c, claims, payouts)
+
         paid_total = 0
         paid_claims = 0
         ops: list[dict] = []
-        for cl, amount in zip(claims, payouts):
-            if amount <= 0:
-                continue                                      # nothing to pay for -- not an error
-            worker = normalise_subject(cl["worker"])
+        overrides: dict[str, int] = {}
+        for row in plan["per_claim"]:
+            worker, total_amount = row["worker"], row["total"]
+            bonus, bonus_pct = row["bonus"], row["bonus_pct"]
 
-            # Loyalty payout bonus, read off the worker's CURRENT tier --
-            # this order's own payout does not retroactively rank them up
-            # before pricing itself. Added on top of the priced amount,
-            # never in place of it, and stored into paid_coins as the
-            # TOTAL actually paid: paid_coins is what core/loyalty.py sums
-            # to compute future points, and a bonus the worker was really
-            # paid has to count toward their own rank the same as the base
-            # amount does.
-            bonus_pct = loyalty.payout_bonus_pct(worker, conn=c)
-            bonus = (amount * bonus_pct) // 100
-            total_amount = amount + bonus
-
+            # paid_coins stores the TOTAL actually paid, bonus included:
+            # core/loyalty.py sums it to compute future points, and a bonus
+            # the worker was really paid counts toward their own rank the
+            # same as the base amount does.
             event_id = money.new_event_id("payout")
             won = c.execute(
                 "UPDATE order_claims SET paid_event = :evt, paid_coins = :amt "
                 " WHERE id = :cid AND paid_event IS NULL",
-                {"evt": event_id, "amt": total_amount, "cid": cl["id"]},
+                {"evt": event_id, "amt": total_amount, "cid": row["claim_id"]},
             )
             if won.rowcount != 1:
                 continue                                       # a prior approve already paid this
@@ -609,6 +753,69 @@ def approve(order_id: int, approver: str, *,
                             "amount": total_amount},
             })
 
+            # Accrued only inside the won-the-gate branch, so a re-approve
+            # that skips an already-paid claim skips its override too --
+            # otherwise the second approval would pay the manager again on
+            # work already settled.
+            manager = teams.manager_of(worker, conn=c)
+            if manager:
+                cut = (total_amount * teams.MANAGER_OVERRIDE_PCT) // 100
+                if cut > 0:
+                    overrides[manager] = overrides.get(manager, 0) + cut
+
+        # ---------------------------------------------------------- manager overrides
+        # THE COMPANY PAYS THIS. It is a fresh transfer out of
+        # `treasury:shop`, never a deduction from what the worker earned --
+        # the worker's payout above is already final and untouched. Carried
+        # over from AbexTech, where this rule is recorded in the code as
+        # the owner's own ruling after an audit: an override taken off the
+        # worker silently pays them less than the price they claimed
+        # against, and one minted from nothing inflates the money supply
+        # per order.
+        #
+        # In the SAME transaction as the payouts, because two commits have
+        # no safe ordering: a crash between them either mints the override
+        # (credit first) or destroys it (debit first).
+        #
+        # An override is never allowed to cost the WORKER their payment. If
+        # the treasury cannot cover it, the shortfall is skipped and
+        # recorded, not raised -- `money.transfer` would otherwise roll the
+        # whole approval back and the delivered work would go unpaid over a
+        # commission. Availability is read here rather than assumed, inside
+        # the same BEGIN IMMEDIATE, so nothing can move underneath it.
+        override_total = 0
+        override_unpaid = 0
+        for manager, cut in sorted(overrides.items()):
+            available = money.balance("treasury:shop", conn=c).available
+            payable = min(cut, max(available, 0))
+            if payable <= 0:
+                override_unpaid += cut
+                continue
+            if payable < cut:
+                override_unpaid += cut - payable
+            event_id = money.new_event_id("override")
+            money.transfer(
+                "treasury:shop", manager, payable,
+                service="shop",
+                reason=(f"order #{order_id} manager override at "
+                        f"{teams.MANAGER_OVERRIDE_PCT}% on their team's payouts"),
+                ref_kind="order", ref_id=str(order_id), idem_key=event_id, conn=c,
+            )
+            # Recorded as a row, in this same transaction, so "what has
+            # managing earned" is a join rather than a scan of free-text
+            # ledger reasons.
+            c.execute(
+                "INSERT INTO team_overrides (order_id, manager, coins, paid_event) "
+                "VALUES (?, ?, ?, ?)",
+                (order_id, manager, payable, event_id),
+            )
+            override_total += payable
+            ops.append({
+                "op": "transfer", "src": "treasury:shop", "dst": manager, "amount": payable,
+                "reverse": {"op": "transfer", "src": manager, "dst": "treasury:shop",
+                            "amount": payable},
+            })
+
         c.execute(
             "UPDATE orders SET status = 'fulfilled', closed_at = datetime('now') WHERE id = ?",
             (order_id,),
@@ -619,7 +826,16 @@ def approve(order_id: int, approver: str, *,
             summary=(
                 f"approved order {order_id}: paid {paid_total:,} {CURRENCY} "
                 f"across {paid_claims} claim(s)"
+                + (f", plus {override_total:,} {CURRENCY} in manager override(s)"
+                   if override_total else "")
+                + (f" ({override_unpaid:,} {CURRENCY} of override unfunded)"
+                   if override_unpaid else "")
             ),
-            ops=ops, money_coins=paid_total, manual_coins=0,
+            ops=ops, money_coins=paid_total + override_total, manual_coins=0,
         )
-        return {"paid_coins": paid_total, "paid_claims": paid_claims}
+        return {
+            "paid_coins": paid_total,
+            "paid_claims": paid_claims,
+            "override_coins": override_total,
+            "override_unpaid": override_unpaid,
+        }

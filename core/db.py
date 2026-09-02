@@ -154,6 +154,15 @@ _MIGRATIONS: list[str] = [
     # Nullable on purpose: rounds played before the change have no commitment
     # and must verify as ok=False rather than pretend to one.
     "ALTER TABLE game_rounds ADD COLUMN commitment_id TEXT",
+    # orders gained `payout_coins` when worker pay was separated from the
+    # sell price. Before it, an order paid workers the SAME figure the shop
+    # charged customers, so every completed order lost money -- 320 in and
+    # 375 out once a loyalty bonus applied. DEFAULT 0 is deliberately not
+    # the end of the story: 0 would mean "pays nothing", so `_backfill_
+    # order_payout` immediately copies price_coins into it for every
+    # pre-existing row. Work claimed under the old terms keeps the rate it
+    # was claimed at; only new orders get the margin.
+    "ALTER TABLE orders ADD COLUMN payout_coins INTEGER NOT NULL DEFAULT 0",
 ]
 
 
@@ -240,6 +249,26 @@ def _migrate(conn: sqlite3.Connection) -> None:
             if "duplicate column" not in str(err).lower():
                 raise
     _migrate_game_rounds_check(conn)
+    _backfill_order_payout(conn)
+
+
+def _backfill_order_payout(conn: sqlite3.Connection) -> None:
+    """Give every order written before `payout_coins` existed the rate it
+    was actually created under -- its own sell price.
+
+    Content-probed like every migration here: it only touches rows still
+    sitting at the column default, so it runs once in effect and cannot
+    later stamp over a real payout figure. Retroactively applying today's
+    margin to work somebody already claimed would be repricing their labour
+    after the fact, which is the one thing the snapshot exists to prevent.
+    """
+    try:
+        conn.execute(
+            "UPDATE orders SET payout_coins = price_coins "
+            " WHERE payout_coins = 0 AND price_coins > 0"
+        )
+    except sqlite3.OperationalError:
+        pass  # pre-migration database; the ALTER above will have raised first
 
 
 def seed_if_empty(conn: Optional[sqlite3.Connection] = None) -> int:

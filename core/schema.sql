@@ -61,6 +61,46 @@ CREATE TABLE IF NOT EXISTS team_members (
     PRIMARY KEY (team_id, subject)
 );
 
+-- What a team actually does: "Wood", "Ores", "Brewing". A team with no
+-- focus rows works everything, which is why absence means ALL rather than
+-- NONE -- a team that has not chosen yet must not silently stop being
+-- offered work. Categories are the shop's own, not a second vocabulary
+-- invented here: an order is already filed under one, so matching an order
+-- to the teams that want it is a join, never a guess.
+--
+-- `category` carries NO foreign key to `categories(name)`, deliberately and
+-- to match `items.category`, which is also plain TEXT: `add_item` does not
+-- register a category row, so a category can be in genuine use across the
+-- whole catalog with no row in that table, and an FK here would reject a
+-- manager choosing a category their own shop sells. A focus naming a
+-- category that no longer exists simply matches no orders, which is the
+-- right way for this to decay.
+-- One row per manager override actually PAID, written in the same
+-- transaction as the payout that triggered it. It exists because an
+-- override that is only a ledger entry cannot be counted: the leaderboard
+-- and the loyalty score would both have to identify it by parsing the
+-- free-text `reason`, and this codebase has already been bitten by reading
+-- a reason string as if it were structured data. A row makes "what has
+-- managing actually earned" a join instead of a guess.
+--
+-- `paid_event` is the payout event id that caused it and is UNIQUE, so a
+-- re-approve that skips an already-paid claim cannot write a second row
+-- for the same payout.
+CREATE TABLE IF NOT EXISTS team_overrides (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id   INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+    manager    TEXT    NOT NULL REFERENCES wallets(subject) ON DELETE CASCADE,
+    coins      INTEGER NOT NULL CHECK (coins > 0),
+    paid_event TEXT    NOT NULL UNIQUE,
+    paid_at    TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS team_focus (
+    team_id  INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+    category TEXT    NOT NULL,
+    PRIMARY KEY (team_id, category)
+);
+
 -- Append-only. Never UPDATEd, never DELETEd. `reason` is NOT NULL and
 -- non-empty because an unreasoned entry is an unauditable one.
 CREATE TABLE IF NOT EXISTS ledger_entries (
@@ -224,6 +264,14 @@ CREATE TABLE IF NOT EXISTS orders (
                               CHECK (status IN ('open', 'claimed', 'awaiting_verification',
                                                 'fulfilled', 'cancelled')),
     price_coins       INTEGER NOT NULL CHECK (price_coins >= 0),
+    -- What the WORKER is paid per `price_unit_pieces`, snapshotted at
+    -- creation exactly like the sell price beside it. The shop sells at
+    -- `price_coins` and pays at `payout_coins`; the gap is the margin that
+    -- keeps `treasury:shop` solvent. Kept as its own column rather than
+    -- derived at approval from a live percentage, so changing the margin
+    -- tomorrow can never reprice work somebody already claimed under the
+    -- old terms.
+    payout_coins      INTEGER NOT NULL DEFAULT 0 CHECK (payout_coins >= 0),
     price_unit_pieces INTEGER NOT NULL CHECK (price_unit_pieces > 0),
     stack_size        INTEGER NOT NULL CHECK (stack_size > 0),
     created_by        TEXT    NOT NULL,

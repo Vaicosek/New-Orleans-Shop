@@ -49,19 +49,52 @@ def _icon_html(item_name: str) -> str:
 
 
 def _cart_controls_html(item: dict) -> str:
-    """Checkbox + a single quantity field for one item, inside the page's
-    single cart form. No JavaScript: the quantity is a plain
-    `<input type=number>` the visitor types a piece count into, not a
-    script-driven control, so this works exactly the same with scripting
-    off. Pre-filled with one stack so a visitor who just wants "the usual"
-    amount can check the box and go."""
+    """Checkbox, a quantity field, and the unit that quantity is counted in,
+    inside the page's single cart form.
+
+    No JavaScript: a plain `<input type=number>` and a plain `<select>`, so
+    this works identically with scripting off.
+
+    **The unit defaults to the one the price beside it is quoted in.** A log
+    priced "1 g / stack of 64" is bought by the stack, and asking for it in
+    pieces makes the buyer do the multiplication the price label already
+    did for them -- typing 64 to mean one stack is a conversion, and a
+    conversion is where a mis-order comes from. So when an item is quoted
+    per stack (`price_unit_pieces == stack_size`) the field reads "1 stack";
+    otherwise it stays in pieces, pre-filled with one stack's worth, exactly
+    as before.
+
+    An item that does not stack (`stack_size` of 1 -- a shulker, a saddle)
+    gets no unit control at all rather than a dropdown whose two options
+    mean the same thing. `_resolve_pieces` treats a missing unit as pieces,
+    so the absent control is not a special case there either.
+    """
     item_id = item["id"]
-    stack = item["stack_size"]
+    stack = int(item["stack_size"] or 1)
+    quoted_per_stack = stack > 1 and int(item["price_unit_pieces"] or 0) == stack
+    default_qty = 1 if quoted_per_stack else stack
+
+    if stack > 1:
+        opts = "".join(
+            f'<option value="{value}"{" selected" if value == default_unit else ""}>{label}</option>'
+            for value, label, default_unit in (
+                ("stacks", f"stacks of {stack}", "stacks" if quoted_per_stack else "pieces"),
+                ("pieces", "pieces", "stacks" if quoted_per_stack else "pieces"),
+            )
+        )
+        unit_html = (f'<label class="unit-field"><span class="vis-hidden">Unit</span>'
+                     f'<select name="unit_{item_id}" aria-label="Unit">{opts}</select></label>')
+    else:
+        unit_html = '<span class="unit-fixed dim">pieces</span>'
+
     return f"""<div class="cart-controls">
 <label class="cart-check"><input type="checkbox" name="items" value="{item_id}"> Select</label>
+<div class="qty-row">
 <label class="qty-field">Qty
-<input type="number" name="qty_{item_id}" value="{stack}" min="1" max="999999"
+<input type="number" name="qty_{item_id}" value="{default_qty}" min="1" max="999999"
        inputmode="numeric" aria-label="Quantity"></label>
+{unit_html}
+</div>
 </div>"""
 
 
@@ -198,14 +231,43 @@ async def inventory(request: web.Request) -> web.Response:
     return page("Inventory", "stock", body, identity=identity)
 
 
-def _resolve_pieces(form, item_id: int) -> int:
-    """A checked item's quantity: the typed number field. Raises ValueError
-    for anything that isn't a positive whole number -- the caller turns
-    that into a per-item skip, never a whole-batch failure."""
+#: The largest order the form allows, in PIECES, matching the number input's
+#: own `max`. Enforced here as well because `max` is a client-side hint and
+#: nothing under `core/` bounds `requested_pieces` above zero -- so before
+#: the unit selector existed, a hand-posted form could already open an order
+#: for a billion pieces, and multiplying a stack count by `stack_size` would
+#: have made that 64 times easier to do by accident.
+MAX_ORDER_PIECES = 999_999
+
+
+def _resolve_pieces(form, item_id: int, stack_size: int) -> int:
+    """A checked item's quantity in PIECES -- the number typed, converted
+    from whatever unit the visitor picked beside it.
+
+    Pieces are the only unit anything downstream understands: `orders`
+    stores `requested_pieces`, and `core/pricing.py` divides by
+    `price_unit_pieces` alone. `stack_size` multiplies a COUNT here and
+    never divides a price -- the two have been one column once before, and
+    that is how saplings priced 1 g per 32 ended up half-priced.
+
+    Raises ValueError for anything that is not a positive whole number
+    within the form's own maximum, or for a unit that is not one this form
+    offers -- the caller turns any of those into a per-item skip, never a
+    whole-batch failure. A missing unit means pieces, so a non-stacking
+    item (which renders no unit control at all) needs no special case.
+    """
     raw = str(form.get(f"qty_{item_id}", "")).strip()
-    pieces = int(raw)
-    if pieces <= 0:
-        raise ValueError("pieces must be positive")
+    count = int(raw)
+    if count <= 0:
+        raise ValueError("quantity must be positive")
+
+    unit = str(form.get(f"unit_{item_id}", "pieces")).strip().lower() or "pieces"
+    if unit not in ("pieces", "stacks"):
+        raise ValueError(f"unknown unit {unit!r}")
+
+    pieces = count * max(int(stack_size or 1), 1) if unit == "stacks" else count
+    if pieces > MAX_ORDER_PIECES:
+        raise ValueError(f"{pieces} pieces is over the {MAX_ORDER_PIECES} maximum")
     return pieces
 
 
@@ -231,13 +293,21 @@ async def order_item(request: web.Request) -> web.Response:
         except ValueError:
             failed += 1
             continue
+        # Resolved BEFORE the quantity: converting "3 stacks" into pieces
+        # needs this item's own stack_size, and taking that from the catalog
+        # rather than from the posted form means a tampered post cannot
+        # inflate its own multiplier.
         try:
-            pieces = _resolve_pieces(form, item_id)
+            item = get_item(item_id)  # rejects a stale/tampered item id before opening anything
+        except CatalogError:
+            failed += 1
+            continue
+        try:
+            pieces = _resolve_pieces(form, item_id, item["stack_size"])
         except ValueError:
             failed += 1
             continue
         try:
-            get_item(item_id)  # rejects a stale/tampered item id before opening anything
             quote(item_id, pieces)  # same validation Discord's modal runs before create_order
             order_id = create_order(item_id, pieces, created_by=identity.subject)
         except (CatalogError, OrderError):

@@ -51,7 +51,12 @@ NAV: list[tuple[str, str, str]] = [
     ("Hub", "/me", "account"),
     ("Help", "/help", "help"),
 ]
+#: Staff-only nav entries, appended for a staff identity and rendered by
+#: nobody else -- omitted server-side, never CSS-hidden.
 STAFF_NAV: tuple[str, str, str] = ("Ledger", "/ledger", "ledger")
+STAFF_NAV_EXTRA: tuple[tuple[str, str, str], ...] = (
+    ("Solvency", "/solvency", "solvency"),
+)
 
 
 def esc(value: object) -> str:
@@ -65,6 +70,7 @@ def _nav_html(nav_key: str, identity: Optional[Identity]) -> str:
     items = list(NAV)
     if identity is not None and identity.staff:
         items.append(STAFF_NAV)
+        items.extend(STAFF_NAV_EXTRA)
     parts = []
     for label, href, key in items:
         current = ' aria-current="page"' if key == nav_key else ""

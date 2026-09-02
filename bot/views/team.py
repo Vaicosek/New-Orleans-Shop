@@ -15,10 +15,11 @@ from __future__ import annotations
 
 import discord
 
+from core import catalog
 from core import teams as teams_core
 
 from .pickers import OptionPickerView, UserPickerView
-from ..ui.embed import SEP, panel_embed, rows
+from ..ui.embed import SEP, money_text, panel_embed, rows
 
 
 def member_mention(subject: str) -> str:
@@ -37,10 +38,43 @@ def _roster_lines(team_id: int) -> list[str]:
     return [member_mention(s) for s in members]
 
 
+def _focus_text(team_id: int) -> str:
+    """A team with no focus rows works everything -- say that in words
+    rather than showing an empty field, because "no categories" and "all
+    categories" look identical otherwise and mean opposite things."""
+    chosen = teams_core.focus(team_id)
+    return ", ".join(chosen) if chosen else "everything"
+
+
 def build_team_embed(team) -> discord.Embed:
-    lines = [f"Manager: {member_mention(team['manager'])}", ""]
+    lines = [
+        f"Manager: {member_mention(team['manager'])}",
+        f"Works: {_focus_text(team['id'])}",
+    ]
+    standing = next((r for r in teams_core.leaderboard() if r["id"] == team["id"]), None)
+    if standing is not None and standing["orders"]:
+        lines.append(f"Paid to this team: {money_text(standing['paid'])} "
+                     f"across {standing['orders']} order"
+                     f"{'s' if standing['orders'] != 1 else ''}")
+    lines.append("")
     lines.extend(_roster_lines(team["id"]))
     return panel_embed(team["name"], rows(lines))
+
+
+def build_leaderboard_embed() -> discord.Embed:
+    """Teams by what their people have actually been paid. Ranked, because
+    the point of teams here is that they compete."""
+    board = teams_core.leaderboard()
+    lines = []
+    for i, row in enumerate(board, 1):
+        size = f"{row['member_count'] + 1} strong"   # +1: the manager works too
+        lines.append(f"{i}. **{row['name']}** {SEP} {money_text(row['paid'])} {SEP} "
+                     f"{row['orders']} order{'s' if row['orders'] != 1 else ''} {SEP} {size}")
+    return panel_embed(
+        "Team standings",
+        rows(lines, empty_text="No teams yet."),
+        footer="Ranked by gold actually paid for completed work",
+    )
 
 
 def build_no_team_embed(*, can_create: bool) -> discord.Embed:
@@ -118,7 +152,9 @@ class TeamManagerView(discord.ui.View):
 
         for label, style, cb in (
             ("Add member", discord.ButtonStyle.primary, self._add),
+            ("Set focus", discord.ButtonStyle.secondary, self._focus),
             ("Rename", discord.ButtonStyle.secondary, self._rename),
+            ("Standings", discord.ButtonStyle.secondary, self._standings),
             ("Disband", discord.ButtonStyle.danger, self._disband),
         ):
             button = discord.ui.Button(label=label, style=style)
@@ -155,6 +191,44 @@ class TeamManagerView(discord.ui.View):
             "Who are you adding?", view=UserPickerView(self.owner_id, picked), ephemeral=True,
         )
 
+    async def _focus(self, interaction: discord.Interaction) -> None:
+        """Which categories this team wants pinged for. A multi-select, so
+        the manager sees every option and their current choice at once --
+        never a typed list of category names."""
+        team = teams_core.team_of(self.subject)
+        if team is None:
+            await interaction.response.send_message("You don't run a team.", ephemeral=True)
+            return
+        chosen = set(teams_core.focus(team["id"]))
+        names = [c["name"] for c in catalog.list_categories()][:25]
+        if not names:
+            await interaction.response.send_message(
+                "The catalog has no categories yet, so there is nothing to focus on.",
+                ephemeral=True)
+            return
+
+        select: discord.ui.Select = discord.ui.Select(
+            placeholder="Everything (choose to narrow)...",
+            min_values=0, max_values=len(names),
+            options=[discord.SelectOption(label=n[:100], value=n[:100],
+                                          default=n in chosen) for n in names],
+        )
+
+        async def picked(inter: discord.Interaction) -> None:
+            teams_core.set_focus(self.subject, list(select.values))
+            await self.refresh(inter, f"Now working: {_focus_text(team['id'])}.")
+
+        select.callback = picked
+        view = discord.ui.View(timeout=180)
+        view.add_item(select)
+        await interaction.response.send_message(
+            "Pick the categories this team works. Choose none to work everything.",
+            view=view, ephemeral=True)
+
+    async def _standings(self, interaction: discord.Interaction) -> None:
+        await interaction.response.send_message(
+            embed=build_leaderboard_embed(), ephemeral=True)
+
     async def _rename(self, interaction: discord.Interaction) -> None:
         async def submitted(inter: discord.Interaction, name: str) -> None:
             teams_core.rename(self.subject, name)
@@ -187,6 +261,11 @@ class TeamMemberView(discord.ui.View):
             return False
         return True
 
+    @discord.ui.button(label="Standings", style=discord.ButtonStyle.secondary)
+    async def standings(self, interaction: discord.Interaction, _b: discord.ui.Button) -> None:
+        await interaction.response.send_message(
+            embed=build_leaderboard_embed(), ephemeral=True)
+
     @discord.ui.button(label="Leave team", style=discord.ButtonStyle.danger)
     async def leave(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
         teams_core.leave(self.subject)
@@ -210,12 +289,19 @@ class TeamJoinView(discord.ui.View):
         join = discord.ui.Button(label="Join a team", style=discord.ButtonStyle.secondary)
         join.callback = self._join
         self.add_item(join)
+        standings = discord.ui.Button(label="Standings", style=discord.ButtonStyle.secondary)
+        standings.callback = self._standings
+        self.add_item(standings)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.owner_id:
             await interaction.response.send_message("This panel isn't yours.", ephemeral=True)
             return False
         return True
+
+    async def _standings(self, interaction: discord.Interaction) -> None:
+        await interaction.response.send_message(
+            embed=build_leaderboard_embed(), ephemeral=True)
 
     async def _create(self, interaction: discord.Interaction) -> None:
         async def submitted(inter: discord.Interaction, name: str) -> None:

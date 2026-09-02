@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import discord
 
-from core import catalog, orders as orders_core
-from core.pricing import price_label
+from core import catalog, orders as orders_core, teams as teams_core
+from core.pricing import charge, price_label
 
 from . import orders as order_views
 from .pickers import ItemPickerView
@@ -51,6 +51,48 @@ def build_shop_embed() -> discord.Embed:
     return panel_embed("New Orleans shop", body)
 
 
+def _payout_total(order_id: int) -> int:
+    """What this order will pay its workers in total, read off the order's
+    own snapshot -- never recomputed from the item's live price, which is
+    the SELL price and a different number entirely."""
+    try:
+        order = orders_core.get_order(order_id)
+        return charge(order["requested_pieces"],
+                      order["payout_coins"] or order["price_coins"],
+                      order["price_unit_pieces"])
+    except Exception:  # noqa: BLE001 -- a confirmation must not fail over a figure
+        return 0
+
+
+def _ping_for(category: object) -> str:
+    """The teams to put in front of a new order card, by name.
+
+    The whole point of a team declaring what it works: an order for ores
+    reaches the ore crew instead of every member of the server reading
+    every order. A team that has declared nothing works everything and is
+    included; a team with no members is not, since mentioning an empty
+    roster is noise for everybody else.
+
+    Team NAMES, not member mentions. A roster of fourteen would put
+    fourteen pings on one card, which is the "@everyone for every order"
+    problem wearing a different hat -- the name tells the right people it
+    is theirs, and the card is already in the channel they watch. Nothing
+    is mentioned at all when the category matches every team, because a
+    ping that always fires is one nobody reads.
+    """
+    if not category:
+        return ""
+    try:
+        matched = teams_core.teams_for_category(str(category))
+        total = sum(1 for row in teams_core.leaderboard() if row["member_count"])
+    except Exception:  # noqa: BLE001 -- a card that posts beats a perfect mention
+        return ""
+    if not matched or (total and len(matched) >= total):
+        return ""
+    names = ", ".join(row["name"] for row in matched[:5])
+    return f"For {names}"
+
+
 class _QuantityModal(discord.ui.Modal):
     """Pieces requested is genuinely free text (a quantity), never an
     identity -- the item itself is already resolved by the picker above."""
@@ -60,19 +102,62 @@ class _QuantityModal(discord.ui.Modal):
         self.item = item
         self.requester = requester
         self.channel_id = channel_id
+        stack = int(item.get("stack_size") or 1)
+        self.stack_size = stack
+        # A modal may only hold text inputs -- no dropdown -- so the unit
+        # rides in the field itself rather than costing a whole extra
+        # picker step ahead of the modal. Goods here are quoted per stack
+        # ("1 g / stack of 64"), and making somebody multiply that out to
+        # order is where a mis-order comes from.
+        if stack > 1:
+            label, placeholder = "How many? (pieces, or '3 stacks')", f"e.g. 64 or 3 stacks"
+        else:
+            label, placeholder = "How many pieces?", "e.g. 64"
         self.pieces = discord.ui.TextInput(
-            label="How many pieces?", placeholder="e.g. 64", max_length=8, required=True
+            label=label[:45], placeholder=placeholder, max_length=16, required=True
         )
         self.add_item(self.pieces)
+
+    def _parse_quantity(self, raw: str) -> tuple[int, str]:
+        """Return (pieces, what_they_asked_for) from the typed quantity.
+
+        Accepts a bare count in pieces, or a count followed by a stack word
+        -- "3 stacks", "3 stack", "3s", "3 st". `stack_size` MULTIPLIES a
+        count here; it never divides a price (that is `price_unit_pieces`
+        alone, and the two were one column once, which is how saplings at
+        1 g per 32 came out half-priced). Raises ValueError for anything
+        else, including a stack unit on an item that does not stack, so the
+        caller can say so plainly rather than silently ordering pieces.
+        """
+        text = " ".join(str(raw).strip().lower().split())
+        in_stacks = False
+        for suffix in ("stacks", "stack", "st", "s"):
+            if text.endswith(suffix):
+                head = text[: -len(suffix)].strip()
+                if head:
+                    text, in_stacks = head, True
+                    break
+        count = int(text)
+        if count <= 0:
+            raise ValueError("quantity must be positive")
+        if not in_stacks:
+            return count, f"{count:,} pieces"
+        if self.stack_size <= 1:
+            raise ValueError(f"{self.item['name']} does not come in stacks")
+        pieces = count * self.stack_size
+        return pieces, f"{count:,} stack{'s' if count != 1 else ''} ({pieces:,} pieces)"
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
         try:
-            pieces = int(str(self.pieces.value).strip())
-            if pieces <= 0:
-                raise ValueError
-        except ValueError:
-            await interaction.followup.send("Pieces must be a positive whole number.", ephemeral=True)
+            pieces, asked_for = self._parse_quantity(self.pieces.value)
+        except ValueError as err:
+            hint = (" You can type a piece count, or a stack count like \"3 stacks\"."
+                    if self.stack_size > 1 else "")
+            detail = str(err) if str(err) and "invalid literal" not in str(err) else ""
+            await interaction.followup.send(
+                (f"Could not read that quantity{': ' + detail if detail else ''}."
+                 f"{hint}"), ephemeral=True)
             return
 
         quote = catalog.quote(self.item["id"], pieces)
@@ -106,7 +191,10 @@ class _QuantityModal(discord.ui.Modal):
         else:
             try:
                 embed = order_views.build_order_embed(order_id)
-                posted = await channel.send(embed=embed, view=order_views.OrderCardView())
+                posted = await channel.send(
+                    content=_ping_for(self.item.get("category")) or None,
+                    embed=embed, view=order_views.OrderCardView(),
+                )
             except discord.HTTPException as err:
                 post_note = (
                     f" Could not post the public order card ({err}) -- the order "
@@ -121,9 +209,9 @@ class _QuantityModal(discord.ui.Modal):
                     post_note = " Posted in the orders channel for workers to claim."
 
         await interaction.followup.send(
-            f"Opened order #{order_id}: {pieces} × {self.item['name']} "
-            f"({quote['price_label']}, worth {money_text(quote['total_coins'])} "
-            f"at payout).{post_note}",
+            f"Opened order #{order_id}: {asked_for} of {self.item['name']} "
+            f"(sells at {quote['price_label']}; pays workers "
+            f"{money_text(_payout_total(order_id))}).{post_note}",
             ephemeral=True,
         )
 

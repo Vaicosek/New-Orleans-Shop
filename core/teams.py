@@ -171,6 +171,162 @@ def roster(team_id: int, *, conn: Optional[sqlite3.Connection] = None) -> list[s
     return [r["subject"] for r in rows]
 
 
+def override_earned(subject: str, *, conn: Optional[sqlite3.Connection] = None) -> int:
+    """Total override this subject has been paid for managing a team.
+
+    Read off `team_overrides` rows -- money that actually moved -- rather
+    than recomputed from a percentage, so a period when the treasury could
+    only part-fund an override counts what was really paid.
+    """
+    with db_in(conn) as c:
+        row = c.execute(
+            "SELECT COALESCE(SUM(coins), 0) AS total FROM team_overrides WHERE manager = ?",
+            (subject,),
+        ).fetchone()
+    return int(row["total"] or 0)
+
+
+#: The manager's override on a team member's order payout, as a percent.
+#: Carried over from AbexTech's MANAGER_OVERRIDE_ORDER_PCT default. The
+#: COMPANY pays this -- see `manager_of`'s note and CONTRACT.md 11d.
+MANAGER_OVERRIDE_PCT = 5
+
+
+def manager_of(subject: str, *, conn: Optional[sqlite3.Connection] = None) -> Optional[str]:
+    """The manager who earns an override on `subject`'s work, or None.
+
+    Deliberately NOT `team_of(...)["manager"]`: that returns the team a
+    subject MANAGES before the one they belong to, so a manager claiming an
+    order themselves would come back as their own manager and be paid an
+    override on their own payout. Only membership earns somebody else an
+    override, so this reads `team_members` alone.
+    """
+    with db_in(conn) as c:
+        row = c.execute(
+            "SELECT t.manager FROM teams t JOIN team_members m ON m.team_id = t.id "
+            " WHERE m.subject = ?",
+            (subject,),
+        ).fetchone()
+    if row is None or row["manager"] == subject:
+        return None
+    return row["manager"]
+
+
+# ------------------------------------------------------------------ focus
+
+def set_focus(manager: str, categories: list[str], *,
+              conn: Optional[sqlite3.Connection] = None) -> None:
+    """Replace a team's focus outright with `categories`.
+
+    Replace rather than merge: the panel that calls this hands over the
+    complete set the manager selected, so treating it as an addition would
+    make deselecting a category impossible -- the classic multi-select bug
+    where the list only ever grows.
+
+    An empty list clears the focus, which means the team works EVERYTHING
+    again (see the schema note); it does not mean the team works nothing.
+    """
+    with db_in(conn) as c:
+        team = _require_manager_by_lookup(c, manager)
+        c.execute("DELETE FROM team_focus WHERE team_id = ?", (team["id"],))
+        for category in dict.fromkeys(categories):   # de-duped, order kept
+            c.execute(
+                "INSERT OR IGNORE INTO team_focus (team_id, category) VALUES (?, ?)",
+                (team["id"], category),
+            )
+
+
+def focus(team_id: int, *, conn: Optional[sqlite3.Connection] = None) -> list[str]:
+    with db_in(conn) as c:
+        rows = c.execute(
+            "SELECT category FROM team_focus WHERE team_id = ? ORDER BY category",
+            (team_id,),
+        ).fetchall()
+    return [r["category"] for r in rows]
+
+
+def teams_for_category(category: str, *,
+                       conn: Optional[sqlite3.Connection] = None) -> list[dict]:
+    """Every team that would want an order in `category` -- the ones that
+    named it, plus the ones that have named nothing and therefore work
+    everything. This is what turns "ping the whole server for every order"
+    into "ping the people who actually do this".
+
+    A team with no members is excluded: pinging a roster of nobody is a
+    mention that reaches nobody and makes the card noisier for everyone
+    else.
+    """
+    with db_in(conn) as c:
+        rows = c.execute(
+            "SELECT t.id, t.manager, t.name, "
+            "       (SELECT COUNT(*) FROM team_members m WHERE m.team_id = t.id) AS member_count "
+            "  FROM teams t "
+            " WHERE (EXISTS (SELECT 1 FROM team_focus f WHERE f.team_id = t.id "
+            "                  AND f.category = ?) "
+            "     OR NOT EXISTS (SELECT 1 FROM team_focus f WHERE f.team_id = t.id)) "
+            "   AND EXISTS (SELECT 1 FROM team_members m WHERE m.team_id = t.id) "
+            " ORDER BY t.name",
+            (category,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ------------------------------------------------------------------ standings
+
+def leaderboard(*, conn: Optional[sqlite3.Connection] = None) -> list[dict]:
+    """Teams ranked by what their members have actually been PAID for
+    completed work, highest first.
+
+    Derived live from `order_claims` on every read -- never a running total
+    on the team row. Same discipline as `core/loyalty.py`'s score and
+    `core/wagering.py`'s exposure, and for the same reason: a stored
+    counter and the ledger disagree the first time anything is voided,
+    repriced or written off, and the counter is always the one that is
+    wrong.
+
+    `paid_coins` is the total actually paid for a claim, bonus included, so
+    a team's standing reflects real money that left the treasury rather
+    than a priced estimate of work. Only claims with a `paid_event` count:
+    delivered-but-unapproved work is not yet money and must not rank.
+
+    A team's MANAGER is counted alongside its members. In the system this
+    is modelled on, the manager claims orders and hands them to their
+    people, so leaving the manager's own claims out understates exactly
+    the teams that are working hardest.
+
+    Two figures make up a standing, and both are returned separately as
+    well as summed: `worked` is gold paid for claims the team's people
+    delivered, `managed` is override earned by running the team. A team
+    that produces nothing and rides on overrides is visibly different from
+    one that produces, and collapsing them into a single number would hide
+    exactly that.
+    """
+    with db_in(conn) as c:
+        rows = c.execute(
+            "WITH roster AS ( "
+            "  SELECT id AS team_id, manager AS subject FROM teams "
+            "  UNION ALL "
+            "  SELECT team_id, subject FROM team_members "
+            ") "
+            "SELECT t.id, t.name, t.manager, "
+            "       (SELECT COUNT(*) FROM team_members m WHERE m.team_id = t.id) AS member_count, "
+            "       COUNT(DISTINCT oc.order_id) AS orders, "
+            "       COALESCE(SUM(oc.paid_coins), 0) AS worked, "
+            "       (SELECT COALESCE(SUM(o.coins), 0) FROM team_overrides o "
+            "         WHERE o.manager = t.manager) AS managed, "
+            "       COALESCE(SUM(oc.paid_coins), 0) "
+            "         + (SELECT COALESCE(SUM(o.coins), 0) FROM team_overrides o "
+            "             WHERE o.manager = t.manager) AS paid "
+            "  FROM teams t "
+            "  JOIN roster r ON r.team_id = t.id "
+            "  LEFT JOIN order_claims oc "
+            "    ON oc.worker = r.subject AND oc.paid_event IS NOT NULL "
+            " GROUP BY t.id, t.name, t.manager "
+            " ORDER BY paid DESC, orders DESC, t.name ASC"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def list_teams(*, conn: Optional[sqlite3.Connection] = None) -> list[dict]:
     """Every team with its member count, most recently created first --
     used by the join picker and by anyone just browsing what exists."""

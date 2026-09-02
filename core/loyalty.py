@@ -92,6 +92,27 @@ def _order_points(c: sqlite3.Connection, subject: str) -> int:
     return int(row["total"]) // POINTS_DIVISOR
 
 
+def _override_points(c: sqlite3.Connection, subject: str) -> int:
+    """Points for running a team, from override actually paid.
+
+    Managing IS work in this shop -- the manager claims orders and gets
+    their people producing -- so a manager who earns nothing but override
+    would otherwise stay a Recruit forever while their team ranks up
+    around them. Carried over from AbexTech, which pays a manager a cut of
+    their workers' loyalty POINTS alongside the coin override
+    (`MANAGER_OVERRIDE_POINTS_PCT`); here it falls out of the same
+    `team_overrides` rows the standings use, so the two can never disagree
+    about what managing earned.
+
+    Same divisor as everything else, and derived on every read.
+    """
+    row = c.execute(
+        "SELECT COALESCE(SUM(coins), 0) AS total FROM team_overrides WHERE manager = ?",
+        (subject,),
+    ).fetchone()
+    return int(row["total"]) // POINTS_DIVISOR
+
+
 def _auction_points(c: sqlite3.Connection, subject: str) -> int:
     row = c.execute(
         "SELECT COALESCE(SUM(amount), 0) AS total FROM auction_bids "
@@ -102,10 +123,13 @@ def _auction_points(c: sqlite3.Connection, subject: str) -> int:
 
 
 def earned_points(subject: str, *, conn: Optional[sqlite3.Connection] = None) -> int:
-    """Points from real activity alone -- orders fulfilled as a worker, plus
-    auctions won as a bidder. Never includes the holding half."""
+    """Points from real activity alone -- orders fulfilled as a worker,
+    auctions won as a bidder, and override earned running a team. Never
+    includes the holding half."""
     with db_in(conn) as c:
-        return _order_points(c, subject) + _auction_points(c, subject)
+        return (_order_points(c, subject)
+                + _auction_points(c, subject)
+                + _override_points(c, subject))
 
 
 def score(subject: str, *, conn: Optional[sqlite3.Connection] = None) -> dict:

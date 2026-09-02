@@ -167,19 +167,27 @@ status = orders.mark_fulfilled(order_id, "u:worker1", 64)
 check("order reaches awaiting_verification once fully delivered",
       status == "awaiting_verification")
 
+# The shop sells this at 640 and pays the worker the snapshotted payout rate
+# for the same 64 pieces -- the gap is the margin that keeps treasury:shop
+# solvent (CONTRACT.md 11d). Computed, not hardcoded, so the rate can move
+# without silently rewriting what this test believes.
+_PAY_640 = charge(64, orders.worker_payout_for(640), 64)
 result = orders.approve(order_id, "u:manager")
-check("approve pays the full order value", result["paid_coins"] == 640)
-check("worker was actually credited", money.balance("u:worker1").coins == 640)
+check("approve pays the full order value at the payout rate",
+      result["paid_coins"] == _PAY_640, f"got {result['paid_coins']}, wanted {_PAY_640}")
+check("the payout is genuinely BELOW the sell price -- the shop keeps a margin",
+      0 < _PAY_640 < 640, f"payout {_PAY_640} against a 640 sale")
+check("worker was actually credited", money.balance("u:worker1").coins == _PAY_640)
 check("order is now fulfilled", orders.get_order(order_id)["status"] == "fulfilled")
 
 raises("re-approving an already-fulfilled order is refused", orders.NotClaimable,
        orders.approve, order_id, "u:manager")
 check("balance is unchanged after the refused re-approve",
-      money.balance("u:worker1").coins == 640)
+      money.balance("u:worker1").coins == _PAY_640)
 
 claims_after = orders.list_claims(order_id)
 check("the claim's paid_event was set exactly once",
-      claims_after[0]["paid_event"] is not None and claims_after[0]["paid_coins"] == 640)
+      claims_after[0]["paid_event"] is not None and claims_after[0]["paid_coins"] == _PAY_640)
 
 # ------------------------------------------------------------------ REGRESSION: order approval is audited
 # core/schema.sql:87 -- audit_actions was never written by anything. Every
@@ -198,7 +206,7 @@ if audit_rows:
     row = dict(audit_rows[0])
     check("the audit row names the real approver as actor", row["actor"] == "u:manager")
     check("money_coins matches what approve() actually paid out",
-          row["money_coins"] == 640, f"got {row['money_coins']}")
+          row["money_coins"] == _PAY_640, f"got {row['money_coins']}")
     check("manual_coins is 0 -- an order payout is never a human debt",
           row["manual_coins"] == 0)
     ops = audit.get(row["id"])["ops"]
@@ -246,7 +254,9 @@ raises("a worker who fulfilled the order cannot approve it", orders.SelfApproval
        orders.approve, order_id, "u:worker1")
 check("nothing was paid by the refused self-approval", money.balance("u:worker1").coins == 0)
 ok_result = orders.approve(order_id, "u:manager")
-check("a different approver can still approve it", ok_result["paid_coins"] == 128)
+check("a different approver can still approve it",
+      ok_result["paid_coins"] == charge(64, orders.worker_payout_for(128), 64),
+      f"got {ok_result['paid_coins']}")
 
 # ------------------------------------------------------------------ delivery bound
 print("\ndelivery cannot exceed a worker's own claim")
@@ -331,7 +341,11 @@ _FIXED_SPLITS = {
 
 for _price in _AWKWARD_PRICES:
     _item_id = make_item(f"Split Regression {_price}", price=_price, stack=_STACK)
-    _expected = charge(64, _price, _STACK)
+    # The shop SELLS at _price and PAYS workers at the snapshotted payout
+    # rate (CONTRACT.md 11d / core.orders.WORKER_PAYOUT_PCT). What this
+    # block guards is unchanged by that: the total must be identical
+    # however the 64 pieces are split across claimants.
+    _expected = charge(64, orders.worker_payout_for(_price), _STACK)
 
     _splits = dict(_FIXED_SPLITS)
     for _i in range(3):

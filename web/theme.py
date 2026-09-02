@@ -209,6 +209,18 @@ tbody tr:hover td{background:var(--raised)}
   border:1px solid var(--line);border-radius:4px;color:var(--text);
   font-size:13px;font-variant-numeric:tabular-nums;padding:3px 6px}
 .qty-field input[type=number]:focus{outline:none;border-color:var(--accent)}
+/* Quantity and its unit sit on one line and wrap together on a narrow
+   phone rather than the unit dropping under the checkbox on its own. */
+.qty-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.unit-field select{background:var(--ground-deep);border:1px solid var(--line);
+  border-radius:4px;color:var(--text);font-family:inherit;font-size:13px;
+  padding:3px 6px}
+.unit-field select:focus{outline:none;border-color:var(--accent)}
+.unit-fixed{font-size:13px}
+/* Label text kept for a screen reader where the visible column heading
+   already says it for everyone else. */
+.vis-hidden{position:absolute;width:1px;height:1px;margin:-1px;padding:0;
+  overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
 .order-link{font-size:13px}
 
 /* The page-level submit for every checked item at once -- appears above and

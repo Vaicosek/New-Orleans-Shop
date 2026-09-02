@@ -12,7 +12,7 @@ from __future__ import annotations
 from aiohttp import web
 
 from core.db import connection
-from core.loyalty import summary as loyalty_summary
+from core.loyalty import ladder as loyalty_ladder, summary as loyalty_summary
 from core.money import balance, public_history
 from core.teams import roster as team_roster, team_of
 from core.pricing import money_text, price_label
@@ -215,6 +215,35 @@ def _short_id(subject: str) -> str:
     return str(subject)
 
 
+def _ladder_html(loy: dict) -> str:
+    """The whole rank ladder, with the visitor's own rung marked.
+
+    `core.loyalty.ladder()` shipped with no caller at all, so a player could
+    see their rank and the points to the next one but never what the rungs
+    ARE or what reaching them is worth -- "1,200 points to Veteran" means
+    nothing without knowing Veteran pays 5% more on every order. A ladder
+    nobody can see cannot motivate anybody to climb it.
+
+    A rank carries a second benefit that this page deliberately omits:
+    section 9's wall is not just a vocabulary rule, the site must never let
+    on that the other side of the network exists at all -- and this scan
+    reads docstrings too, which is why it cannot be named even here. Only
+    the order-side bonus appears.
+    """
+    here = (loy.get("tier") or {}).get("key")
+    rows = "".join(
+        f'<tr class="{"s-you" if r["key"] == here else ""}">'
+        f'<td>{esc(r["name"])}{" &mdash; you" if r["key"] == here else ""}</td>'
+        f'<td class="num">{r["min_points"]:,}</td>'
+        f'<td class="num">+{r["payout_bonus_pct"]}%</td></tr>'
+        for r in loyalty_ladder()
+    )
+    return (f'<h2>The ranks</h2>\n'
+            f'<div class="tablewrap"><table><thead><tr><th>Rank</th>'
+            f'<th>Points needed</th><th>Extra on completed orders</th></tr></thead>'
+            f'<tbody>{rows}</tbody></table></div>')
+
+
 async def me(request: web.Request) -> web.Response:
     identity = await resolve_identity(request)
     if identity is None:
@@ -287,6 +316,8 @@ async def me(request: web.Request) -> web.Response:
   <div class="row"><span>Order bonus</span><span>+{loy["payout_bonus_pct"]}% extra on completed orders</span></div>
   {f'<div class="row"><span>Next rank</span><span>{esc(loy["next_tier"]["name"])} in {loy["next_tier"]["points_needed"]:,} points</span></div>' if loy["next_tier"] else ''}
 </div>
+
+{_ladder_html(loy)}
 
 <h2>Your team</h2>
 {_team_html(identity.subject)}

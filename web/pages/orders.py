@@ -120,7 +120,7 @@ def live_orders(limit: int = 100) -> list[dict]:
     with db_in() as c:
         rows = c.execute(
             f"SELECT o.id, o.requested_pieces, o.produced_pieces, o.status, "
-            f"       o.price_coins, o.price_unit_pieces, o.stack_size, o.created_at, "
+            f"       o.price_coins, o.payout_coins, o.price_unit_pieces, o.stack_size, o.created_at, "
             f"       i.name AS item_name "
             f"  FROM orders o JOIN items i ON i.id = o.item_id "
             f" WHERE o.status IN ({placeholders}) "
@@ -138,7 +138,10 @@ def _order_card(o: dict) -> str:
     clipped or push the whole thing sideways off a phone. `itemgrid` drops
     to two columns under 560px on its own, so nothing here scrolls off.
     """
-    price = esc(price_label(o["price_coins"], o["price_unit_pieces"], o["stack_size"]))
+    # The board exists so somebody can decide whether to take the work,
+    # so it shows what the work PAYS -- not the shop's sell price.
+    price = esc(price_label(o["payout_coins"] or o["price_coins"],
+                            o["price_unit_pieces"], o["stack_size"]))
     tone = STATUS_TONE.get(o["status"], "")
     return f"""<div class="item">
 <div class="item-name">{esc(o["item_name"])}</div>

@@ -432,6 +432,80 @@ rename or roster edit is a plain row write with nothing to replay into a double 
 `role:manager`/`STAFF_ROLE_IDS` check `/admin` already runs -- no new provisioned role,
 no `/setup` changes. Joining and leaving are open to anyone.
 
+**Teams compete, and the standing is DERIVED.** `teams.leaderboard()` ranks teams by
+gold actually paid to their people for completed work, recomputed from `order_claims` on
+every read -- never a counter on the team row, same discipline as loyalty's score and
+wagering's exposure, and for the same reason: a stored total and the ledger disagree the
+first time anything is voided, repriced or written off, and the counter is the one that
+is wrong. Only claims carrying a `paid_event` count, so delivered-but-unapproved work is
+not yet money and does not rank. A team's MANAGER is counted alongside its members: the
+manager claims orders and hands them to their people, so omitting their claims would
+understate exactly the teams working hardest.
+
+**A team declares what it works, and that decides who gets pinged.** `team_focus` holds
+zero or more of the shop's own catalog categories per team. **No rows means EVERY
+category, never none** -- a team that has not chosen yet must not silently stop being
+offered work, and an empty multi-select must not read as "works nothing". `set_focus`
+REPLACES the set rather than merging it, or deselecting would be impossible. When an
+order card is posted, `_ping_for` names the teams whose focus covers that item's
+category -- team names, never member mentions, because a roster of fourteen would put
+fourteen pings on one card, which is the "@everyone for every order" problem in a new
+hat. Nothing is named when the category matches every team, since a ping that always
+fires is one nobody reads. `team_focus.category` deliberately carries NO foreign key to
+`categories(name)`, matching `items.category`, which is also plain TEXT: `add_item`
+never registers a category row, so an FK would reject a manager choosing a category
+their own shop sells.
+
+**The shop sells at one price and pays workers at another.** `orders` snapshots BOTH:
+`price_coins` is what a customer is charged, `payout_coins` is what a worker is paid for
+producing the same quantity, and the gap is the margin that keeps `treasury:shop`
+solvent. They were one number until 2026-09-02, which meant every completed order paid
+out exactly what it charged -- and once a top-rank loyalty bonus landed on top, more:
+measured at 375 paid against a 320 sale, a 17% loss on every order the shop completed.
+No amount of funding fixes a per-unit loss.
+
+`core.orders.WORKER_PAYOUT_PCT` (70) sets the rate, and `worker_payout_for()` NEVER
+returns 0 for a priced item: at 70% anything priced 1 floors to 0, and a zero payout
+rate is not cheap work -- `approve()` raises `ZeroPrice` on it, so the order can never
+be paid and delivered work sits stranded. Money is whole coins, so below about 2 there
+is no margin to take; the shop pays the full 1 and keeps nothing rather than breaking
+the order. The rate is SNAPSHOTTED per order exactly like the sell price, so changing
+the margin never reprices work somebody already claimed, and `reprice()` moves both
+together -- repricing exists to make a stuck order payable, and leaving the payout at
+the old snapshot would defeat exactly that.
+
+**Every figure a worker reads is the payout, never the sell price.** The order card, the
+claim panel, the website work board and the order confirmation all render
+`payout_coins`. A card promising 320 that pays 224 is a worse defect than the one it
+replaced. Staff approval is the mirror image: `preview_approval` returns what LEAVES THE
+TREASURY -- payouts, plus each worker's loyalty bonus, plus any manager override --
+computed by `_payout_plan`, the single function `approve()` also pays from. Those two
+drifted once already (preview said 320, approval paid 375, short by every bonus in the
+order), which is why they are now one code path and not two implementations that agree
+until one changes.
+
+**Managing is work, and it ranks.** Every override actually paid is written to
+`team_overrides` in the same transaction as the payout that caused it, keyed on that
+payout's event id so a re-approve cannot write a second row. It is a ROW rather than
+only a ledger entry because both the standings and the loyalty score have to count it,
+and the alternative is identifying overrides by parsing the ledger's free-text `reason`
+-- a mistake this codebase has already made once. A team's standing therefore reports
+two figures, `worked` and `managed`, summed but never collapsed, so a team that produces
+nothing and rides on override is visibly different from one that produces.
+`core.loyalty` counts the same rows, so a manager who earns only override still climbs
+the ladder instead of staying a Recruit while their team ranks up around them.
+
+**The margin is a setting, not a constant.** `core.orders.WORKER_PAYOUT_PCT` is only the
+default; the live value lives in `config` under `worker_payout_pct` and is set from
+`/admin` -> Margin. It is bounded 1..100 on every read and any unreadable, absent or
+out-of-range value degrades to the default -- this number decides what leaves the
+treasury on every approval, so a stored 0 must never become a payment of nothing and a
+stored 500 must never become five times the sale. The read is best-effort for the same
+reason it is bounded: it happens inside open transactions and before `init_db` has run,
+and a margin that cannot be read is the default margin, not a crash while somebody opens
+an order. Changing it affects NEW orders only; every order snapshots its own rate at
+creation.
+
 ## 11. Loyalty ranks
 
 **Adapted from AbexTech's `abex_tiers.py`, not copied.** AbexTech blends two
@@ -524,6 +598,7 @@ Three audiences, one shell.
 | `/me` | customer | Discord OAuth2. Own orders, balance, history, team |
 | `/order` | customer | POST only. Opens a production/restock request -- the site's one write route |
 | `/ledger` | staff | internal: balances, orders, payouts, audit trail |
+| `/solvency` | staff | can the shop pay what it owes: assets against liabilities, and margin per item |
 | `/health` | public | must answer when the bot is down |
 
 Public routes take no session and touch no bot state — they answer when the bot is down.

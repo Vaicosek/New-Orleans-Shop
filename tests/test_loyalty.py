@@ -34,6 +34,7 @@ os.environ["NOLA_DB_PATH"] = str(Path(_tmp) / "test.db")
 os.environ["NOLA_GAME_SEED_SECRET"] = "test-secret-do-not-use-in-prod"
 
 from core import auctions, catalog, db, games, loyalty, orders, wagering  # noqa: E402
+from core.pricing import charge                                          # noqa: E402
 
 FAILS: list[str] = []
 
@@ -82,11 +83,21 @@ def make_item(name: str, price: int = 6_400, stack: int = 64) -> int:
                              category="test")
 
 
+#: A sell price whose WORKER PAYOUT is exactly 100 coins per piece, so
+#: `pay_worker` can still promise an exact figure now that the shop sells at
+#: one price and pays workers at another. Derived from the live constant
+#: rather than hardcoded at 143: if the margin ever moves, this moves with
+#: it instead of silently paying 70% of what the tests below believe.
+_PRICE_PAYING_100 = next(
+    price for price in range(100, 1000) if orders.worker_payout_for(price) == 100
+)
+
+
 def pay_worker(worker: str, coins_wanted: int) -> None:
     """Run one order through the real lifecycle so `worker` is actually
     PAID `coins_wanted` (at the loyalty bonus that's in effect for them
-    right now) -- 100 coins/piece so the numbers stay clean."""
-    item_id = make_item(f"item-for-{worker}-{coins_wanted}", price=100, stack=1)
+    right now) -- 100 coins of PAYOUT per piece so the numbers stay clean."""
+    item_id = make_item(f"item-for-{worker}-{coins_wanted}", price=_PRICE_PAYING_100, stack=1)
     pieces = coins_wanted // 100
     order_id = orders.create_order(item_id, pieces, created_by="u:owner")
     orders.claim(order_id, worker, pieces)
@@ -191,24 +202,34 @@ reset()
 money.mint("u:owner", 1, service="owner", reason="seed")
 loyalty.set_override("u:8", "elite", actor="u:owner")           # +12% payout bonus, forced
 item8 = make_item("bonus test item", price=100, stack=1)
-order8 = orders.create_order(item8, 100, created_by="u:owner")  # priced payout would be 10,000
+order8 = orders.create_order(item8, 100, created_by="u:owner")
+# The shop SELLS 100 of these for 10,000 and PAYS the worker the snapshotted
+# payout rate for them; the +12% elite bonus lands on top of the PAYOUT, not
+# on top of the sale, or a fully-ranked worker would cost more than the order
+# is worth (CONTRACT.md 11d).
+_BASE_8 = charge(100, orders.worker_payout_for(100), 1)
+_WITH_BONUS_8 = _BASE_8 + (_BASE_8 * 12) // 100
 orders.claim(order8, "u:8", 100)
 orders.mark_fulfilled(order8, "u:8", 100)
 before = money.balance("u:8").coins
 result8 = orders.approve(order8, "u:approver")
 after = money.balance("u:8").coins
-check("the worker was paid MORE than the bare priced amount (10,000 + 12%)",
-      after - before == 11_200, f"paid {after - before}")
-check("approve()'s own reported total includes the bonus", result8["paid_coins"] == 11_200)
+check("the worker was paid MORE than the bare payout amount (payout + 12%)",
+      after - before == _WITH_BONUS_8, f"paid {after - before}, wanted {_WITH_BONUS_8}")
+check("the bonus is genuinely on top", _WITH_BONUS_8 > _BASE_8)
+check("...and the whole thing still costs the shop less than the 10,000 sale",
+      _WITH_BONUS_8 < 10_000, f"cost {_WITH_BONUS_8} against a 10,000 sale")
+check("approve()'s own reported total includes the bonus",
+      result8["paid_coins"] == _WITH_BONUS_8)
 with db.db() as c:
     paid_coins_row = c.execute(
         "SELECT paid_coins FROM order_claims WHERE order_id = ?", (order8,)
     ).fetchone()
 check("paid_coins on the claim itself is the TOTAL actually paid, bonus included",
-      paid_coins_row["paid_coins"] == 11_200, str(dict(paid_coins_row)))
+      paid_coins_row["paid_coins"] == _WITH_BONUS_8, str(dict(paid_coins_row)))
 loyalty.clear_override("u:8")
-check("the bonus counts toward the worker's OWN future points (11,200 // divisor)",
-      loyalty.earned_points("u:8") == 11_200 // loyalty.POINTS_DIVISOR)
+check("the bonus counts toward the worker's OWN future points",
+      loyalty.earned_points("u:8") == _WITH_BONUS_8 // loyalty.POINTS_DIVISOR)
 
 # A Recruit (no override, no history) gets no bonus at all -- the existing
 # order-payout tests in test_shop.py depend on paying EXACTLY the priced
@@ -220,8 +241,9 @@ order9 = orders.create_order(item9, 50, created_by="u:owner")
 orders.claim(order9, "u:9", 50)
 orders.mark_fulfilled(order9, "u:9", 50)
 result9 = orders.approve(order9, "u:approver")
-check("a Recruit worker is paid the bare priced amount, no bonus added",
-      result9["paid_coins"] == 5_000, str(result9))
+check("a Recruit worker is paid the bare payout amount, no bonus added",
+      result9["paid_coins"] == charge(50, orders.worker_payout_for(100), 1),
+      str(result9))
 
 # ------------------------------------------------------------------ [6] the bet cap bonus is REAL
 print("\nwagering.check_wager() actually raises MAX_BET/MAX_DAILY_LOSS for a ranked subject")
