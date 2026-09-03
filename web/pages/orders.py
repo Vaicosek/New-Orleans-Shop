@@ -95,6 +95,16 @@ def _waiting_text(created_at: str) -> str:
     return f"Waiting {days} day{'s' if days != 1 else ''}"
 
 
+def _date_text(ts: object) -> str:
+    """A deadline as a date a person reads -- "12 September 2026". Naive UTC
+    in the database, stamped before it is formatted."""
+    try:
+        dt = datetime.strptime(str(ts), "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return str(ts)
+    return f"{dt.day} {dt.strftime('%B')} {dt.year}"
+
+
 def _progress_text(produced: int, requested: int) -> str:
     """Pieces made against pieces wanted, always with the unit spelled out.
 
@@ -121,6 +131,7 @@ def live_orders(limit: int = 100) -> list[dict]:
         rows = c.execute(
             f"SELECT o.id, o.requested_pieces, o.produced_pieces, o.status, "
             f"       o.price_coins, o.payout_coins, o.price_unit_pieces, o.stack_size, o.created_at, "
+            "       o.bounty_pct, o.wanted_by, "
             f"       i.name AS item_name "
             f"  FROM orders o JOIN items i ON i.id = o.item_id "
             f" WHERE o.status IN ({placeholders}) "
@@ -147,7 +158,9 @@ def _order_card(o: dict) -> str:
 <div class="item-name">{esc(o["item_name"])}</div>
 <div class="item-stock dim">Order #{o["id"]}</div>
 <div class="item-price">{price}</div>
+{f'<div class="s-open">Bounty: +{int(o["bounty_pct"])}% added &mdash; nobody has claimed it</div>' if o.get("bounty_pct") else ''}
 <div>{esc(_progress_text(o["produced_pieces"], o["requested_pieces"]))}</div>
+{f'<div class="item-stock dim">Wanted by {esc(_date_text(o["wanted_by"]))}</div>' if o.get("wanted_by") else ''}
 <div class="{tone}">{esc(status_word(o["status"]))}</div>
 <div class="item-stock dim">{esc(_waiting_text(o["created_at"]))}</div>
 </div>"""

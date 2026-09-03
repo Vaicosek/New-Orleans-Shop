@@ -25,6 +25,7 @@ gets no exemption from those rules:
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from . import audit, loyalty, money, teams
@@ -178,6 +179,7 @@ def worker_payout_for(price_coins: int, *, pct: int | None = None,
 
 def create_order(item_id: int, requested_pieces: int, created_by: str, *,
                   channel_id: str | None = None, message_id: str | None = None,
+                  wanted_in_days: int | None = None,
                   conn: Optional[sqlite3.Connection] = None) -> int:
     """Open an order, SNAPSHOTTING the item's current price and stack size
     onto the order row.
@@ -209,13 +211,18 @@ def create_order(item_id: int, requested_pieces: int, created_by: str, *,
         if not item["active"]:
             raise NoSuchItem(f"item {item_id} is not active")
         payout_coins = worker_payout_for(item["price_coins"], conn=c)
+        wanted_by = None
+        if wanted_in_days is not None:
+            days = _positive_int(wanted_in_days, "wanted_in_days")
+            wanted_by = (datetime.now(timezone.utc) + timedelta(days=days)
+                         ).strftime("%Y-%m-%d %H:%M:%S")
         cur = c.execute(
             "INSERT INTO orders (item_id, requested_pieces, price_coins, payout_coins, "
-            "price_unit_pieces, stack_size, created_by, channel_id, message_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "price_unit_pieces, stack_size, created_by, channel_id, message_id, wanted_by) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (item_id, requested_pieces, item["price_coins"], payout_coins,
              item["price_unit_pieces"], item["stack_size"], created_by,
-             channel_id, message_id),
+             channel_id, message_id, wanted_by),
         )
         return cur.lastrowid
 
@@ -252,6 +259,7 @@ def set_message(order_id: int, channel_id: str, message_id: str, *,
 
 
 def claim(order_id: int, worker: str, pieces: int, *,
+          for_team: bool = False,
           conn: Optional[sqlite3.Connection] = None) -> int:
     """Claim `pieces` pieces of `order_id` for `worker`.
 
@@ -268,16 +276,27 @@ def claim(order_id: int, worker: str, pieces: int, *,
     pieces = _positive_int(pieces, "pieces")
     worker = normalise_subject(worker)
     with db_in(conn) as c:
+        # A team claim: the manager is the worker of record and is paid,
+        # then distributes -- the AbexTech model. The team id is recorded so
+        # the card can say "for The Levee Crew" and the standings can credit
+        # the team; the money path is exactly an ordinary claim by the
+        # manager, so nothing about approval changes.
+        team_id = None
+        if for_team:
+            team_row = c.execute("SELECT id FROM teams WHERE manager = ?", (worker,)).fetchone()
+            if team_row is None:
+                raise NotClaimable(f"{worker} does not run a team")
+            team_id = int(team_row["id"])
         try:
             cur = c.execute(
-                "INSERT INTO order_claims (order_id, worker, pieces) "
-                "SELECT :oid, :worker, :pieces "
+                "INSERT INTO order_claims (order_id, worker, pieces, team_id) "
+                "SELECT :oid, :worker, :pieces, :team "
                 "  FROM orders o "
                 " WHERE o.id = :oid "
                 "   AND o.status IN ('open', 'claimed') "
                 "   AND :pieces <= o.requested_pieces - COALESCE("
                 "         (SELECT SUM(pieces) FROM order_claims WHERE order_id = :oid), 0)",
-                {"oid": order_id, "worker": worker, "pieces": pieces},
+                {"oid": order_id, "worker": worker, "pieces": pieces, "team": team_id},
             )
         except sqlite3.IntegrityError as err:
             raise AlreadyClaimed(f"{worker} already claimed order {order_id}") from err
@@ -346,6 +365,127 @@ def mark_fulfilled(order_id: int, worker: str, delivered_pieces: int, *,
             {"t": total, "st": new_status, "oid": order_id},
         )
         return new_status
+
+
+# ------------------------------------------------------------------ reliability
+
+def reliability(worker: str, *, conn: Optional[sqlite3.Connection] = None) -> dict[str, int]:
+    """Pieces this worker claimed against pieces they actually delivered,
+    over every claim on an order that has FINISHED (fulfilled or cancelled).
+
+    Open work is excluded on purpose: a claim in progress is neither kept
+    nor broken yet, and counting it would punish whoever took a big order
+    this morning. Derived on every read, never a stored score.
+
+    Returns claimed, delivered and a percentage; a worker with no finished
+    claims gets 100 rather than 0 -- no record is not a bad record.
+    """
+    worker = normalise_subject(worker)
+    with db_in(conn) as c:
+        row = c.execute(
+            "SELECT COALESCE(SUM(oc.pieces), 0) AS claimed, "
+            "       COALESCE(SUM(oc.delivered), 0) AS delivered, "
+            "       COUNT(*) AS claims "
+            "  FROM order_claims oc JOIN orders o ON o.id = oc.order_id "
+            " WHERE oc.worker = ? AND o.status IN ('fulfilled', 'cancelled')",
+            (worker,),
+        ).fetchone()
+    claimed, delivered = int(row["claimed"]), int(row["delivered"])
+    pct = 100 if claimed == 0 else min(100, delivered * 100 // claimed)
+    return {"claimed": claimed, "delivered": delivered, "claims": int(row["claims"]), "pct": pct}
+
+
+# ------------------------------------------------------------------ bounty + deadline sweep
+
+#: An order nobody has claimed for this many days gets a bounty step.
+BOUNTY_AFTER_DAYS = 3
+#: Each step adds this many percentage points OF THE SELL PRICE to the payout.
+BOUNTY_STEP_PCT = 5
+#: The payout never rises above this share of the sell price. 90 leaves the
+#: shop a sliver of margin even before a loyalty bonus and a manager
+#: override land on top; 100 would mean giving the goods away to get them
+#: made, and above that the shop pays to be rid of its own order.
+BOUNTY_CAP_PCT = 90
+
+
+def bounty_pct_cap(order) -> int:
+    """How far this order's bounty can still climb, given its own payout
+    already sits at some share of its sell price."""
+    price = int(order["price_coins"] or 0)
+    if price <= 0:
+        return 0
+    # payout_coins is the base rate PLUS every bounty step so far; the cap
+    # is on the whole thing. Measuring room from the base alone let the
+    # bounty climb past the cap one step at a time -- 105% of the sale
+    # after a few sweeps, which is the shop paying to be rid of its order.
+    current_pct = int(order["payout_coins"] or 0) * 100 // price
+    return max(BOUNTY_CAP_PCT - current_pct, 0)
+
+
+def sweep_stale(*, conn: Optional[sqlite3.Connection] = None) -> dict[str, list[int]]:
+    """Two things, in one pass, for orders still sitting OPEN with no claims:
+
+    1. Past `wanted_by`: cancel. The customer said when they needed it and
+       nobody took it on; leaving it open past that is a promise to nobody.
+       A CLAIMED order past its date is somebody's work in progress and is
+       left alone -- the deadline is for finding a worker, not for cutting
+       one off.
+    2. Unclaimed for BOUNTY_AFTER_DAYS since it was opened or last bumped:
+       add BOUNTY_STEP_PCT of the sell price to the payout, up to
+       BOUNTY_CAP_PCT. This is the margin turned into a lever -- the shop
+       gives up margin only on the work nobody wants, one step at a time,
+       and the step stops the moment the order is claimed because the
+       sweep never touches a claimed order.
+
+    Idempotent per period: `bounty_at` records the last bump, so running
+    this every minute bumps at most once per BOUNTY_AFTER_DAYS. Each order
+    is its own transaction so one bad row never blocks the rest, same as
+    the auction and bond sweeps.
+    """
+    now = datetime.now(timezone.utc)
+    now_s = now.strftime("%Y-%m-%d %H:%M:%S")
+    cutoff = (now - timedelta(days=BOUNTY_AFTER_DAYS)).strftime("%Y-%m-%d %H:%M:%S")
+    cancelled: list[int] = []
+    bumped: list[int] = []
+
+    with db_in(conn) as c:
+        rows = c.execute(
+            "SELECT o.* FROM orders o "
+            " WHERE o.status = 'open' "
+            "   AND NOT EXISTS (SELECT 1 FROM order_claims oc WHERE oc.order_id = o.id)",
+        ).fetchall()
+
+    for o in rows:
+        try:
+            if o["wanted_by"] and o["wanted_by"] < now_s:
+                cancel(o["id"], actor="system",
+                       reason="nobody claimed it by the date it was wanted", conn=conn)
+                cancelled.append(o["id"])
+                continue
+            last = o["bounty_at"] or o["created_at"]
+            if last > cutoff:
+                continue
+            room = bounty_pct_cap(o)
+            if room <= 0:
+                continue
+            step = min(BOUNTY_STEP_PCT, room)
+            add = (int(o["price_coins"]) * step) // 100
+            if add <= 0:
+                continue
+            with db_in(conn) as c:
+                won = c.execute(
+                    "UPDATE orders SET payout_coins = payout_coins + :add, "
+                    "       bounty_pct = bounty_pct + :step, bounty_at = :now "
+                    " WHERE id = :id AND status = 'open' "
+                    "   AND COALESCE(bounty_at, created_at) <= :cutoff "
+                    "   AND NOT EXISTS (SELECT 1 FROM order_claims oc WHERE oc.order_id = :id)",
+                    {"add": add, "step": step, "now": now_s, "id": o["id"], "cutoff": cutoff},
+                )
+                if won.rowcount == 1:
+                    bumped.append(o["id"])
+        except Exception:  # noqa: BLE001 -- one bad order never blocks the sweep
+            continue
+    return {"cancelled": cancelled, "bumped": bumped}
 
 
 def cancel(order_id: int, *, actor: str = "system", reason: str | None = None,

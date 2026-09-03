@@ -85,7 +85,7 @@ def _leading_bid(c: sqlite3.Connection, land_id: int) -> Optional[sqlite3.Row]:
 
 def open_listing(name: str, description: str, location: str, min_bid: int,
                   min_increment: int, duration_minutes: int, *, created_by: str,
-                  buy_now_price: Optional[int] = None,
+                  buy_now_price: Optional[int] = None, rent_coins: int = 0,
                   conn: Optional[sqlite3.Connection] = None) -> int:
     if not name or not name.strip():
         raise LandError("name is required")
@@ -97,17 +97,103 @@ def open_listing(name: str, description: str, location: str, min_bid: int,
         raise LandError("duration_minutes must be positive")
     if buy_now_price is not None and buy_now_price < min_bid:
         raise LandError("buy_now_price cannot be below min_bid")
+    if rent_coins < 0:
+        raise LandError("rent_coins cannot be negative")
     with db_in(conn) as c:
         closes_at = (datetime.now(timezone.utc)
                      + timedelta(minutes=duration_minutes)).strftime("%Y-%m-%d %H:%M:%S")
         cur = c.execute(
             "INSERT INTO land_listings (name, description, location, min_bid, "
-            "min_increment, buy_now_price, created_by, closes_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "min_increment, buy_now_price, rent_coins, created_by, closes_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (name.strip(), description.strip(), location.strip(), min_bid, min_increment,
-             buy_now_price, created_by, closes_at),
+             buy_now_price, rent_coins, created_by, closes_at),
         )
         return cur.lastrowid
+
+
+# ------------------------------------------------------------------ stalls: rent
+
+RENT_PERIOD_DAYS = 30
+
+
+def _period_for(settled_at: str, now: datetime) -> tuple[int, str]:
+    """Which rent period `now` falls in, counting from the settlement, and
+    that period's label. Period 0 is the deposit month (paid by the winning
+    bid); rent is owed from period 1 on."""
+    start = datetime.strptime(settled_at, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    n = max((now - start).days // RENT_PERIOD_DAYS, 0)
+    return n, f"p{n}"
+
+
+def sweep_rent(*, conn: Optional[sqlite3.Connection] = None) -> dict[str, list[int]]:
+    """Charge rent on every let stall whose current period is unpaid; vacate
+    the ones whose tenant cannot pay.
+
+    A stall is a settled listing with `rent_coins > 0`, a winner, and no
+    `vacated_at`. The winning bid was the deposit and covers period 0; from
+    period 1 the tenant owes `rent_coins` per RENT_PERIOD_DAYS, paid to
+    `treasury:shop` -- recurring income from space in the shop's own
+    district, which is scarce by definition on a server where land is not.
+
+    Idempotent per period: `land_rent` is UNIQUE on (land_id, period), so
+    this can run every minute and charge once a period. A tenant who cannot
+    cover the rent is vacated rather than run into debt -- the deficit floor
+    on a player wallet is 0 and must stay 0; a stall is not worth a
+    negative balance. Each stall is its own transaction, one bad row never
+    blocking the rest, like every other sweep here.
+    """
+    now = datetime.now(timezone.utc)
+    now_s = now.strftime("%Y-%m-%d %H:%M:%S")
+    charged: list[int] = []
+    vacated: list[int] = []
+    with db_in(conn) as c:
+        stalls = c.execute(
+            "SELECT id, winner, rent_coins, settled_at FROM land_listings "
+            " WHERE status = 'settled' AND rent_coins > 0 AND winner IS NOT NULL "
+            "   AND vacated_at IS NULL AND settled_at IS NOT NULL"
+        ).fetchall()
+    for s in stalls:
+        try:
+            n, period = _period_for(s["settled_at"], now)
+            if n < 1:
+                continue                                    # still inside the deposit month
+            with db_in(conn) as c:
+                already = c.execute(
+                    "SELECT 1 FROM land_rent WHERE land_id = ? AND period = ?",
+                    (s["id"], period),
+                ).fetchone()
+                if already:
+                    continue
+                available = money.balance(s["winner"], conn=c).available
+                if available < int(s["rent_coins"]):
+                    c.execute(
+                        "UPDATE land_listings SET vacated_at = ? WHERE id = ? AND vacated_at IS NULL",
+                        (now_s, s["id"]),
+                    )
+                    audit.record(
+                        c, actor="system", target=f"land:{s['id']}", kind="land.vacate",
+                        summary=(f"stall {s['id']} vacated: {s['winner']} could not cover "
+                                 f"{s['rent_coins']:,} rent for {period}"),
+                        ops=[], money_coins=0, manual_coins=0,
+                    )
+                    vacated.append(s["id"])
+                    continue
+                event_id = money.new_event_id("rent")
+                money.transfer(
+                    s["winner"], TREASURY, int(s["rent_coins"]), service=SERVICE,
+                    reason=f"stall {s['id']} rent, period {period}",
+                    ref_kind="land", ref_id=str(s["id"]), idem_key=event_id, conn=c,
+                )
+                c.execute(
+                    "INSERT INTO land_rent (land_id, tenant, period, coins, paid_event) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (s["id"], s["winner"], period, int(s["rent_coins"]), event_id),
+                )
+                charged.append(s["id"])
+        except Exception:  # noqa: BLE001 -- one stall never blocks the sweep
+            continue
+    return {"charged": charged, "vacated": vacated}
 
 
 def bid(land_id: int, subject: str, amount: int, *,

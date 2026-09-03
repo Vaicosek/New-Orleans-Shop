@@ -25,7 +25,7 @@ import re
 
 import discord
 
-from core import money, orders as orders_core
+from core import money, orders as orders_core, teams as teams_core
 from core.pricing import price_label
 
 from .. import addressing, loyalty_sync, queries
@@ -90,6 +90,41 @@ def parse_order_id(message: discord.Message | None) -> int | None:
         return None
 
 
+def _team_name(team_id: object) -> str:
+    try:
+        row = teams_core.team_of  # noqa: F841 -- keeps the import honest
+        from core.db import db_in
+        with db_in() as c:
+            r = c.execute("SELECT name FROM teams WHERE id = ?", (int(team_id),)).fetchone()
+        return r["name"] if r else "a team"
+    except Exception:  # noqa: BLE001
+        return "a team"
+
+
+def _reliability_tag(worker: str) -> str:
+    """"92% delivered" beside a claimant, from finished claims only. Shown
+    only once there is a record -- a first-timer gets no tag rather than a
+    hollow 100%."""
+    try:
+        r = orders_core.reliability(worker)
+    except Exception:  # noqa: BLE001
+        return ""
+    if r["claims"] == 0:
+        return ""
+    return f" {SEP} {r['pct']}% delivered"
+
+
+def _when_text(ts: object) -> str:
+    """A deadline as a Discord timestamp, so every reader sees it in their
+    own zone. Naive UTC in the database, stamped before conversion."""
+    from datetime import datetime, timezone
+    try:
+        dt = datetime.strptime(str(ts), "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        return f"<t:{int(dt.timestamp())}:D>"
+    except (TypeError, ValueError):
+        return str(ts)
+
+
 def build_order_embed(order_id: int) -> discord.Embed:
     order = queries.get_order_detail(order_id)
     if order is None:
@@ -101,14 +136,28 @@ def build_order_embed(order_id: int) -> discord.Embed:
     label = price_label(order["payout_coins"] or order["price_coins"],
                         order["price_unit_pieces"], order["stack_size"])
     claim_lines = [
-        f"{worker_mention(c['worker'])} {SEP} claimed {c['pieces']}, delivered {c['delivered']}"
+        f"{worker_mention(c['worker'])}"
+        + (f" for **{_team_name(c['team_id'])}**" if c.get("team_id") else "")
+        + f" {SEP} claimed {c['pieces']}, delivered {c['delivered']}"
         + (f" (paid {money_text(c['paid_coins'])})" if c["paid_coins"] else "")
+        + _reliability_tag(c["worker"])
         for c in claims
     ]
+    # A bounty is the one number on this card that changes while nobody is
+    # looking, so it is named as such rather than folded silently into the
+    # price -- a worker should know the shop is paying over the odds for
+    # this one, and by how much.
+    bounty_line = (f"Bounty: +{order['bounty_pct']}% of the sell price added "
+                   f"because nobody has claimed it\n"
+                   if order.get("bounty_pct") else "")
+    wanted_line = (f"Wanted by {_when_text(order['wanted_by'])}\n"
+                   if order.get("wanted_by") else "")
     body = (
         f"{order['item_name']}\n"
         f"{label}\n"
+        f"{bounty_line}"
         f"Requested {order['requested_pieces']}  {SEP} produced {order['produced_pieces']}\n"
+        f"{wanted_line}"
         f"Status: {status_label(order['status'])}\n\n"
         f"{rows(claim_lines, empty_text='No claims yet.')}"
     )
@@ -168,6 +217,14 @@ class _PiecesModal(discord.ui.Modal):
             if self.action == "claim":
                 orders_core.claim(self.order_id, self.worker, pieces)
                 msg = f"Claimed {pieces} pieces of order #{self.order_id}."
+            elif self.action == "claim_team":
+                # The manager is the worker of record and is paid, then
+                # distributes -- the AbexTech model. core.orders refuses
+                # this for anyone who does not run a team, and that
+                # refusal reads back here in plain words.
+                orders_core.claim(self.order_id, self.worker, pieces, for_team=True)
+                msg = (f"Claimed {pieces} pieces of order #{self.order_id} for your team. "
+                       f"The payout comes to you on approval; you settle up with your people.")
             else:
                 new_status = orders_core.mark_fulfilled(self.order_id, self.worker, pieces)
                 msg = f"Recorded {pieces} pieces delivered on order #{self.order_id} ({new_status})."
@@ -272,6 +329,19 @@ class OrderCardView(discord.ui.View):
             return
         await interaction.response.send_modal(
             _PiecesModal("Claim pieces", order_id, money.user(interaction.user.id), "claim")
+        )
+
+    @discord.ui.button(label="Claim for team", style=discord.ButtonStyle.secondary,
+                        custom_id="nola:order:claim_team")
+    async def claim_team_btn(self, interaction: discord.Interaction,
+                              _button: discord.ui.Button) -> None:
+        order_id = parse_order_id(interaction.message)
+        if order_id is None:
+            await interaction.response.send_message("Could not identify this order.", ephemeral=True)
+            return
+        await interaction.response.send_modal(
+            _PiecesModal("Claim for your team", order_id, money.user(interaction.user.id),
+                         "claim_team")
         )
 
     @discord.ui.button(label="Mark delivered", style=discord.ButtonStyle.secondary,

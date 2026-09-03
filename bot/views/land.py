@@ -82,6 +82,13 @@ def build_land_embed(land_id: int) -> discord.Embed:
     )
     if listing["buy_now_price"] is not None:
         lines.append(f"Buy now: {money_text(listing['buy_now_price'])}")
+    if listing.get("rent_coins"):
+        # A stall, not a sale: say what the winner is actually signing up
+        # for, or "won" means one thing on the card and another next month.
+        lines.append(f"Stall: winning bid is the deposit, then "
+                     f"{money_text(listing['rent_coins'])} rent every 30 days")
+        if listing.get("vacated_at"):
+            lines.append("Vacated: rent was not covered")
     if listing["leader_subject"] is not None:
         lines.append(
             f"Current lead: {bidder_mention(listing['leader_subject'])} "

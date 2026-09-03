@@ -112,6 +112,16 @@ def _cart_controls_html(item: dict) -> str:
 </div>"""
 
 
+def _stock_html(pieces: int) -> str:
+    """"280 on hand" is information; "0 on hand" 280 times over is a wall
+    that reads as a dead shop. This is a production shop -- nearly
+    everything is made to order -- so zero is the ordinary state, not a
+    warning, and gets the ordinary label. A real quantity still shows."""
+    if pieces > 0:
+        return f'<div class="item-stock dim">{pieces:,} on hand</div>'
+    return '<div class="item-stock dim">made to order</div>'
+
+
 def _grid_html(items: list[dict], identity) -> str:
     cards = []
     for i in items:
@@ -123,7 +133,7 @@ def _grid_html(items: list[dict], identity) -> str:
 {_icon_html(i["name"])}
 <div class="item-name">{esc(i["name"])}</div>
 <div class="item-price">{price}</div>
-<div class="item-stock dim">{stock["pieces"]:,} on hand</div>
+{_stock_html(stock["pieces"])}
 {controls}
 </div>""")
     return f'<div class="itemgrid">{"".join(cards)}</div>'
@@ -132,8 +142,16 @@ def _grid_html(items: list[dict], identity) -> str:
 def _cart_submit_html(identity) -> str:
     if identity is None:
         return ""
+    # One deadline for the whole request. The form appears twice on the
+    # page (top and bottom); a browser submits every field in the form, so
+    # both copies carry the same name and the server reads the first
+    # non-blank one -- see order_item.
     return f"""<div class="cart-submit">
 <input type="hidden" name="csrf" value="{esc(identity.csrf)}">
+<label class="qty-field">Wanted within
+<input type="number" name="wanted_days" min="1" max="90" placeholder="days"
+       inputmode="numeric" aria-label="Wanted within this many days, optional"></label>
+<span class="dim">optional &mdash; unclaimed orders past it are dropped</span>
 <button type="submit">Request selected items</button>
 </div>"""
 
@@ -144,6 +162,29 @@ async def storefront(request: web.Request) -> web.Response:
     # a customer, not even as a bare heading -- that is staff-only to-do
     # information (see /ledger).
     categories = categories_with_items(active_only=True, include_empty=False)
+
+    # A search box on a 280-item grid. Plain GET form, no script: the term
+    # narrows each category's items by substring on the name, and empty
+    # categories drop out. The whole grid is the default, so a visitor who
+    # never types sees exactly what they saw before.
+    q = " ".join(str(request.query.get("q", "")).split())[:60]
+    if q:
+        # The grid renders from cat["groups"][n]["items"], not cat["items"]
+        # -- filtering only the flat list kept the right categories and
+        # then drew every item in them. Narrow both, and drop a group or a
+        # category the moment it has nothing left.
+        needle = q.lower()
+        narrowed = []
+        for cat in categories:
+            groups = []
+            for g in cat.get("groups", []):
+                kept = [it for it in g["items"] if needle in str(it["name"]).lower()]
+                if kept:
+                    groups.append({**g, "items": kept})
+            if groups:
+                flat = [it for it in cat.get("items", []) if needle in str(it["name"]).lower()]
+                narrowed.append({**cat, "groups": groups, "items": flat})
+        categories = narrowed
 
     notice = ""
     ordered_raw = request.query.get("ordered", "")
@@ -183,7 +224,8 @@ async def storefront(request: web.Request) -> web.Response:
             sections.append(f'<h3>{esc(cat["name"])}</h3>' + "".join(group_html))
         table = "".join(sections)
     else:
-        table = '<p class="empty">Nothing stocked yet.</p>'
+        table = (f'<p class="empty">Nothing matches &ldquo;{esc(q)}&rdquo;.</p>' if q
+                 else '<p class="empty">Nothing stocked yet.</p>')
 
     if categories and identity is not None:
         table = (f'<form method="post" action="/order">'
@@ -195,7 +237,14 @@ async def storefront(request: web.Request) -> web.Response:
 <p>Goods on offer today. See <a href="/inventory">inventory</a> for quantity on hand.</p>
 </div>
 {notice}
-<h2>Price sheet</h2>
+<form method="get" action="/" class="search">
+<label class="vis-hidden" for="q">Search</label>
+<input type="search" id="q" name="q" value="{esc(q)}" placeholder="Find an item"
+       maxlength="60" autocomplete="off">
+<button type="submit">Search</button>
+{f'<a class="dim" href="/">Show everything</a>' if q else ''}
+</form>
+<h2>Price sheet{f' &middot; &ldquo;{esc(q)}&rdquo;' if q else ''}</h2>
 {table}
 """
     return page("Storefront", "storefront", body, identity=identity)
@@ -308,6 +357,23 @@ async def order_item(request: web.Request) -> web.Response:
     if not checked:
         return web.Response(text="Select at least one item to request.", status=400)
 
+    # First non-blank of the two identically-named deadline fields (the
+    # submit block renders above and below the grid). Out of range or junk
+    # means no deadline rather than a refused batch -- a typo in an optional
+    # field must not throw away the items somebody just ticked.
+    wanted_days: int | None = None
+    for raw in form.getall("wanted_days", []):
+        raw = str(raw).strip()
+        if not raw:
+            continue
+        try:
+            value = int(raw)
+        except ValueError:
+            break
+        if 1 <= value <= 90:
+            wanted_days = value
+        break
+
     opened: list[int] = []
     failed = 0
     for raw_id in checked:
@@ -333,7 +399,8 @@ async def order_item(request: web.Request) -> web.Response:
             continue
         try:
             quote(item_id, pieces)  # same validation Discord's modal runs before create_order
-            order_id = create_order(item_id, pieces, created_by=identity.subject)
+            order_id = create_order(item_id, pieces, created_by=identity.subject,
+                                    wanted_in_days=wanted_days)
         except (CatalogError, OrderError):
             failed += 1
             continue

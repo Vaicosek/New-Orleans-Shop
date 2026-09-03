@@ -272,6 +272,16 @@ CREATE TABLE IF NOT EXISTS orders (
     -- tomorrow can never reprice work somebody already claimed under the
     -- old terms.
     payout_coins      INTEGER NOT NULL DEFAULT 0 CHECK (payout_coins >= 0),
+    -- Bounty: percentage points of the SELL price added to payout_coins for
+    -- an order nobody has claimed. Raised a step at a time by the bounty
+    -- sweep, capped, never applied to an order already claimed -- the
+    -- margin is given up only on work that is not getting done.
+    bounty_pct        INTEGER NOT NULL DEFAULT 0 CHECK (bounty_pct >= 0),
+    bounty_at         TEXT,
+    -- Optional deadline the customer set. An OPEN order with no claims past
+    -- it is cancelled by the sweep; a claimed one is somebody's work and
+    -- stays. NULL is "whenever".
+    wanted_by         TEXT,
     price_unit_pieces INTEGER NOT NULL CHECK (price_unit_pieces > 0),
     stack_size        INTEGER NOT NULL CHECK (stack_size > 0),
     created_by        TEXT    NOT NULL,
@@ -296,6 +306,11 @@ CREATE TABLE IF NOT EXISTS order_claims (
     paid_event TEXT    UNIQUE,
     paid_coins INTEGER CHECK (paid_coins IS NULL OR paid_coins >= 0),
     claimed_at TEXT    NOT NULL DEFAULT (datetime('now')),
+    -- Set when a manager claimed this FOR their team: the manager is the
+    -- worker of record and is paid, then distributes -- the AbexTech model
+    -- ("he would get paid and then paid them"). Recorded so the card can
+    -- say so and the standings can credit the team.
+    team_id    INTEGER REFERENCES teams(id) ON DELETE SET NULL,
     UNIQUE (order_id, worker),
     CHECK ((paid_event IS NULL) = (paid_coins IS NULL))
 );
@@ -369,6 +384,18 @@ CREATE TABLE IF NOT EXISTS land_listings (
     min_bid         INTEGER NOT NULL CHECK (min_bid > 0),
     min_increment   INTEGER NOT NULL CHECK (min_increment > 0),
     buy_now_price   INTEGER CHECK (buy_now_price IS NULL OR buy_now_price >= min_bid),
+    -- A stall rather than a sale: 0 means the winner buys the plot outright
+    -- (the original land model). Non-zero means the winning bid is a
+    -- deposit and the winner becomes a TENANT who owes this much every 30
+    -- days, charged by the rent sweep; a missed payment vacates the plot.
+    -- Recurring treasury income from space that is scarce by definition --
+    -- the shop's own district -- on a server where land itself is not.
+    rent_coins      INTEGER NOT NULL DEFAULT 0 CHECK (rent_coins >= 0),
+    -- Set when a tenant missed rent and lost the stall. A column rather
+    -- than a fifth status value: SQLite cannot ALTER a CHECK constraint, so
+    -- a new status would need the rename-and-recreate migration
+    -- game_rounds paid for -- a nullable column needs only an ADD COLUMN.
+    vacated_at      TEXT,
     status          TEXT    NOT NULL DEFAULT 'open'
                             CHECK (status IN ('open', 'closed', 'settled', 'voided')),
     winner          TEXT,
@@ -390,6 +417,20 @@ CREATE INDEX IF NOT EXISTS ix_land_listings_message ON land_listings(message_id)
 -- auction_bids, held the same way: bid() marks the previous leader
 -- 'outbid' (and releases its hold) in the SAME transaction that inserts
 -- the new leader.
+-- One row per rent period actually PAID, keyed UNIQUE on (land_id, period)
+-- so the sweep can run any number of times in a month and charge once.
+-- Same shape as team_overrides: a row, not a ledger reason to parse.
+CREATE TABLE IF NOT EXISTS land_rent (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    land_id    INTEGER NOT NULL REFERENCES land_listings(id) ON DELETE CASCADE,
+    tenant     TEXT    NOT NULL REFERENCES wallets(subject),
+    period     TEXT    NOT NULL,
+    coins      INTEGER NOT NULL CHECK (coins > 0),
+    paid_event TEXT    NOT NULL UNIQUE,
+    paid_at    TEXT    NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (land_id, period)
+);
+
 CREATE TABLE IF NOT EXISTS land_bids (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     land_id     INTEGER NOT NULL REFERENCES land_listings(id) ON DELETE CASCADE,

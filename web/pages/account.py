@@ -215,6 +215,23 @@ def _short_id(subject: str) -> str:
     return str(subject)
 
 
+def _record_html(subject: str) -> str:
+    """Claimed against delivered, over finished orders only. A first-timer
+    sees one plain line rather than a hollow 100%."""
+    from core.orders import reliability
+    r = reliability(subject)
+    if r["claims"] == 0:
+        return '<p class="dim">No finished orders yet.</p>'
+    tone = "s-done" if r["pct"] >= 90 else ("s-wait" if r["pct"] >= 60 else "s-stop")
+    return (f'<div class="sums">'
+            f'<div class="row"><span>Delivered</span>'
+            f'<span class="num {tone}">{r["pct"]}% of what you claimed</span></div>'
+            f'<div class="row"><span>Across</span>'
+            f'<span class="num">{r["claims"]} finished claim{"s" if r["claims"] != 1 else ""} '
+            f'&middot; {r["delivered"]:,} of {r["claimed"]:,} pieces</span></div>'
+            f'</div>')
+
+
 def _ladder_html(loy: dict) -> str:
     """The whole rank ladder, with the visitor's own rung marked.
 
@@ -309,6 +326,9 @@ async def me(request: web.Request) -> web.Response:
   <div class="row"><span>Held</span><span>{money_text(bal.held)}</span></div>
   <div class="row total"><span>Balance</span><span>{money_text(bal.coins)}</span></div>
 </div>
+
+<h2>Your record</h2>
+{_record_html(identity.subject)}
 
 <h2>Your rank</h2>
 <div class="sums">

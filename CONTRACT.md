@@ -506,6 +506,51 @@ and a margin that cannot be read is the default margin, not a crash while somebo
 an order. Changing it affects NEW orders only; every order snapshots its own rate at
 creation.
 
+**Unclaimed work earns a bounty; a claimed order is never touched.**
+`orders.sweep_stale` runs every 30 minutes. An OPEN order with no claims for
+`BOUNTY_AFTER_DAYS` (3) has `BOUNTY_STEP_PCT` (5) of its SELL price added to
+`payout_coins`, once per period (`bounty_at` records the last bump), up to
+`BOUNTY_CAP_PCT` (90) of the sale -- the margin turned into a lever, given up only on
+the work nobody wants, one step at a time, and never past the point where the shop pays
+to be rid of its own order. The cap is measured against the whole current payout, not
+the base rate: the first version measured room from the base alone and climbed to 105%
+of the sale. The bump is named on the card and the board as a bounty, because it is the
+one figure that changes while nobody is looking.
+
+**A customer may set a deadline.** `orders.wanted_by` is optional (1..90 days from
+either order form). The same sweep cancels an open, UNCLAIMED order past it -- the
+customer said when they needed it and nobody took it on. A claimed order past its date
+is somebody's work in progress and is left alone: the deadline is for finding a worker,
+not for cutting one off.
+
+**A manager may claim for their team.** `claim(for_team=True)` records
+`order_claims.team_id`; the manager is the worker of record and is paid on approval,
+then settles with their people -- the AbexTech model ("he would get paid and then paid
+them"). The money path is exactly an ordinary claim by the manager, so approval, the
+preview and the override are unchanged. Refused for anyone who runs no team.
+
+**Reliability is claimed against delivered, over FINISHED orders only.**
+`orders.reliability` counts fulfilled and cancelled orders; open work is neither kept
+nor broken yet and is excluded, so taking a big order this morning costs nothing. No
+finished claims reads as 100 -- no record is not a bad record. Shown beside a claimant
+on the order card and on `/me`.
+
+**Stalls: a plot with `rent_coins > 0` is let, not sold.** The winning bid is the
+deposit and covers the first 30 days; from then the tenant owes `rent_coins` per
+`RENT_PERIOD_DAYS`, charged by `land.sweep_rent` to `treasury:shop` -- recurring income
+from space in the shop's own district, which is scarce by definition on a server where
+land is not. `land_rent` is UNIQUE on (land_id, period), so the sweep can run every
+minute and charge once a period. A tenant who cannot cover the rent is VACATED
+(`vacated_at`), never overdrawn: a player wallet's deficit floor is 0 and stays 0, and a
+stall is not worth a negative balance. `vacated_at` is a column rather than a fifth
+status because SQLite cannot ALTER a CHECK constraint.
+
+**Standings are windowed to the month by default.** `teams.leaderboard(since=...)`
+counts work whose order closed, and override paid, at or after `since`; `/team` and
+`/teams` show this month first with a toggle to all time. An all-time board freezes --
+whoever led in week one leads forever and nobody new bothers. A team's existence and
+size are never windowed, only its money.
+
 ## 11. Loyalty ranks
 
 **Adapted from AbexTech's `abex_tiers.py`, not copied.** AbexTech blends two
@@ -620,6 +665,8 @@ barrel has no barrel option. The conversion happens server-side from the CATALOG
 and barrel sizes, never from anything the form posted, and the resulting piece count is
 capped at `MAX_ORDER_PIECES` -- the input's `max` is a client-side hint, and multiplying
 a barrel count by 3,456 makes overshooting easy.
+
+**The storefront has a search box and does not shout zero.** A plain GET form (`?q=`, no script) narrows the grid by substring on the item name; empty groups and categories drop out. An item with nothing on hand reads "made to order", not "0 on hand": this is a production shop, zero is the ordinary state, and 280 zeros in a row read as a dead shop. A real quantity still shows.
 
 **The storefront is a grid, not a table** — each item shows a Minecraft item/block icon
 (bundled at `web/assets/icons/*.png`, inlined as a `data:` URI by `web/icons.py` so the page

@@ -273,7 +273,8 @@ def teams_for_category(category: str, *,
 
 # ------------------------------------------------------------------ standings
 
-def leaderboard(*, conn: Optional[sqlite3.Connection] = None) -> list[dict]:
+def leaderboard(*, since: Optional[str] = None,
+                conn: Optional[sqlite3.Connection] = None) -> list[dict]:
     """Teams ranked by what their members have actually been PAID for
     completed work, highest first.
 
@@ -300,7 +301,14 @@ def leaderboard(*, conn: Optional[sqlite3.Connection] = None) -> list[dict]:
     that produces nothing and rides on overrides is visibly different from
     one that produces, and collapsing them into a single number would hide
     exactly that.
+
+    `since` (a "%Y-%m-%d %H:%M:%S" UTC string) windows the board: only work
+    whose order CLOSED at or after it, and overrides PAID at or after it,
+    count. An all-time board freezes -- whoever led in week one leads
+    forever and nobody new bothers -- so the panels show this month first.
+    A team's identity (size, name) is never windowed, only its money.
     """
+    since_s = since or "0000-00-00 00:00:00"
     with db_in(conn) as c:
         rows = c.execute(
             "WITH roster AS ( "
@@ -313,18 +321,29 @@ def leaderboard(*, conn: Optional[sqlite3.Connection] = None) -> list[dict]:
             "       COUNT(DISTINCT oc.order_id) AS orders, "
             "       COALESCE(SUM(oc.paid_coins), 0) AS worked, "
             "       (SELECT COALESCE(SUM(o.coins), 0) FROM team_overrides o "
-            "         WHERE o.manager = t.manager) AS managed, "
+            "         WHERE o.manager = t.manager AND o.paid_at >= :since) AS managed, "
             "       COALESCE(SUM(oc.paid_coins), 0) "
             "         + (SELECT COALESCE(SUM(o.coins), 0) FROM team_overrides o "
-            "             WHERE o.manager = t.manager) AS paid "
+            "             WHERE o.manager = t.manager AND o.paid_at >= :since) AS paid "
             "  FROM teams t "
             "  JOIN roster r ON r.team_id = t.id "
             "  LEFT JOIN order_claims oc "
             "    ON oc.worker = r.subject AND oc.paid_event IS NOT NULL "
+            "   AND EXISTS (SELECT 1 FROM orders ord WHERE ord.id = oc.order_id "
+            "                 AND COALESCE(ord.closed_at, ord.created_at) >= :since) "
             " GROUP BY t.id, t.name, t.manager "
-            " ORDER BY paid DESC, orders DESC, t.name ASC"
+            " ORDER BY paid DESC, orders DESC, t.name ASC",
+            {"since": since_s},
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def month_start() -> str:
+    """The first instant of the current UTC month, in the database's own
+    timestamp format -- the `since` for a this-month board."""
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    return now.replace(day=1, hour=0, minute=0, second=0).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def list_teams(*, conn: Optional[sqlite3.Connection] = None) -> list[dict]:

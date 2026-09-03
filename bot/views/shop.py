@@ -120,6 +120,12 @@ class _QuantityModal(discord.ui.Modal):
             label=label[:45], placeholder=placeholder, max_length=16, required=True
         )
         self.add_item(self.pieces)
+        self.wanted = discord.ui.TextInput(
+            label="Wanted within how many days? (optional)",
+            placeholder="blank = whenever; unclaimed past it is dropped",
+            max_length=3, required=False,
+        )
+        self.add_item(self.wanted)
 
     def _parse_quantity(self, raw: str) -> tuple[int, str]:
         """Return (pieces, what_they_asked_for) from the typed quantity.
@@ -173,11 +179,26 @@ class _QuantityModal(discord.ui.Modal):
                  f"{hint}"), ephemeral=True)
             return
 
+        wanted_days = None
+        wanted_raw = str(self.wanted.value or "").strip()
+        if wanted_raw:
+            try:
+                wanted_days = int(wanted_raw)
+            except ValueError:
+                await interaction.followup.send(
+                    "Days must be a whole number, or leave it blank.", ephemeral=True)
+                return
+            if not 1 <= wanted_days <= 90:
+                await interaction.followup.send(
+                    "Days must be between 1 and 90, or leave it blank.", ephemeral=True)
+                return
+
         quote = catalog.quote(self.item["id"], pieces)
         try:
             order_id = orders_core.create_order(
                 self.item["id"], pieces, created_by=self.requester,
                 channel_id=str(self.channel_id) if self.channel_id else None,
+                wanted_in_days=wanted_days,
             )
         except orders_core.OrderError as err:
             await interaction.followup.send(f"Could not open that order: {err}", ephemeral=True)

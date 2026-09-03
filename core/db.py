@@ -163,6 +163,16 @@ _MIGRATIONS: list[str] = [
     # pre-existing row. Work claimed under the old terms keeps the rate it
     # was claimed at; only new orders get the margin.
     "ALTER TABLE orders ADD COLUMN payout_coins INTEGER NOT NULL DEFAULT 0",
+    # 2026-09-03: bounties on unclaimed work, customer deadlines, team claims,
+    # and stalls (rented plots). Each is a nullable or defaulted column so an
+    # existing row means exactly what it meant before: no bounty, no
+    # deadline, not a team claim, an outright sale.
+    "ALTER TABLE orders ADD COLUMN bounty_pct INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE orders ADD COLUMN bounty_at TEXT",
+    "ALTER TABLE orders ADD COLUMN wanted_by TEXT",
+    "ALTER TABLE order_claims ADD COLUMN team_id INTEGER REFERENCES teams(id) ON DELETE SET NULL",
+    "ALTER TABLE land_listings ADD COLUMN rent_coins INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE land_listings ADD COLUMN vacated_at TEXT",
 ]
 
 

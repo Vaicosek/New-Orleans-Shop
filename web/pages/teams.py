@@ -61,7 +61,7 @@ def _member_count_text(count: int) -> str:
     return "1 member" if count == 1 else f"{count:,} members"
 
 
-def _standings() -> list[dict]:
+def _standings(since: str | None) -> list[dict]:
     """Teams ranked by gold actually paid to their people for completed
     work, which is what `core.teams.leaderboard()` derives live from
     `order_claims` -- not by roster size, and never from a stored counter.
@@ -69,7 +69,7 @@ def _standings() -> list[dict]:
     Ranking rather than listing is the point: teams here exist to compete.
     Size sorted the directory before there was anything real to sort on;
     now there is."""
-    return core_teams.leaderboard()
+    return core_teams.leaderboard(since=since)
 
 
 def _team_block(team: dict, members: list[str], roster_readable: bool,
@@ -114,11 +114,15 @@ def _team_block(team: dict, members: list[str], roster_readable: bool,
 
 async def teams(request: web.Request) -> web.Response:
     identity = await resolve_identity(request)
+    # This month by default; ?period=all for the frozen board. An all-time
+    # board is led forever by whoever led in week one.
+    all_time = request.query.get("period") == "all"
+    since = None if all_time else core_teams.month_start()
 
     read_failed = False
     rows: list[dict] = []
     try:
-        rows = _standings()
+        rows = _standings(since)
     except Exception:  # noqa: BLE001 -- the page still renders without the list
         read_failed = True
 
@@ -148,7 +152,8 @@ async def teams(request: web.Request) -> web.Response:
 
     body = f"""
 <div class="hero">
-<h1>Teams</h1>
+<h1>Teams &middot; {"all time" if all_time else "this month"}</h1>
+<p class="dim">{'<a href="/teams">Show this month</a>' if all_time else '<a href="/teams?period=all">Show all time</a>'}</p>
 <p>Every team working out of New Orleans, who manages it and who is on it.
 Ranked by the gold actually paid to their people for completed work. Joining, leaving,
 roster changes and what a team works on all happen on the <code>/team</code> command in

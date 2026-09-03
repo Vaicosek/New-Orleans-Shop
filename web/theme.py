@@ -217,6 +217,16 @@ tbody tr:hover td{background:var(--raised)}
   padding:3px 6px}
 .unit-field select:focus{outline:none;border-color:var(--accent)}
 .unit-fixed{font-size:13px}
+/* Search: one row, wraps on a phone. Same field styling as the quantity
+   input so it reads as part of the same sheet, not a bolt-on. */
+.search{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0 0 14px}
+.search input[type=search]{flex:1 1 220px;min-width:0;background:var(--ground-deep);
+  border:1px solid var(--line);border-radius:4px;color:var(--text);font-family:inherit;
+  font-size:14px;padding:6px 9px}
+.search input[type=search]:focus{outline:none;border-color:var(--accent)}
+.search button{background:var(--ground-deep);border:1px solid var(--line);border-radius:4px;
+  color:var(--text);font-family:inherit;font-size:13px;padding:6px 12px;cursor:pointer}
+.search button:hover{border-color:var(--accent)}
 /* Label text kept for a screen reader where the visible column heading
    already says it for everyone else. */
 .vis-hidden{position:absolute;width:1px;height:1px;margin:-1px;padding:0;

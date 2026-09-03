@@ -17,7 +17,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-from core import alerts, auctions, bonds, land, refmarket
+from core import alerts, auctions, bonds, land, orders as orders_core, refmarket
 
 from .. import layout, loyalty_sync
 from ..permissions import is_staff
@@ -40,6 +40,7 @@ class AdminCog(commands.Cog):
         self.sweep_auctions.start()
         self.sweep_land.start()
         self.sweep_bonds.start()
+        self.sweep_orders.start()
 
     def cog_unload(self) -> None:
         self.scan_alerts.cancel()
@@ -47,6 +48,7 @@ class AdminCog(commands.Cog):
         self.sweep_auctions.cancel()
         self.sweep_land.cancel()
         self.sweep_bonds.cancel()
+        self.sweep_orders.cancel()
 
     @app_commands.command(name="admin", description="Items, prices, thresholds, markets, treasury.")
     async def admin(self, interaction: discord.Interaction) -> None:
@@ -298,6 +300,50 @@ class AdminCog(commands.Cog):
     @sweep_bonds.error
     async def sweep_bonds_error(self, err: BaseException) -> None:
         print(f"[bonds] sweep loop crashed: {err!r} -- restarting", flush=True)
+
+    @tasks.loop(minutes=30)
+    async def sweep_orders(self) -> None:
+        """Bounties on unclaimed work and customer deadlines
+        (`orders.sweep_stale`), then stall rent (`land.sweep_rent`). Both
+        are idempotent per period, so the interval is about how quickly a
+        bump or a vacate becomes visible, not about correctness."""
+        try:
+            result = orders_core.sweep_stale()
+        except Exception as err:            # noqa: BLE001
+            print(f"[orders] stale sweep raised: {err!r}", flush=True)
+            result = {"cancelled": [], "bumped": []}
+        for order_id in {*result["cancelled"], *result["bumped"]}:
+            await self._refresh_order_card(order_id)
+        try:
+            rent = land.sweep_rent()
+        except Exception as err:            # noqa: BLE001
+            print(f"[land] rent sweep raised: {err!r}", flush=True)
+            return
+        for land_id in {*rent["charged"], *rent["vacated"]}:
+            await self._refresh_land_card(land_id)
+
+    async def _refresh_order_card(self, order_id: int) -> None:
+        """A bumped bounty or an expired order has to show on the public
+        card, or the sweep changed a number nobody can see."""
+        from ..views.orders import OrderCardView, build_order_embed
+        try:
+            order = orders_core.get_order(order_id)
+        except Exception:  # noqa: BLE001
+            return
+        if not order.get("channel_id") or not order.get("message_id"):
+            return
+        try:
+            channel = self.bot.get_channel(int(order["channel_id"]))
+            if channel is None:
+                channel = await self.bot.fetch_channel(int(order["channel_id"]))
+            message = await channel.fetch_message(int(order["message_id"]))
+            await message.edit(embed=build_order_embed(order_id), view=OrderCardView())
+        except discord.HTTPException as err:
+            print(f"[orders] could not refresh card for order {order_id}: {err!r}", flush=True)
+
+    @sweep_orders.error
+    async def sweep_orders_error(self, err: BaseException) -> None:
+        print(f"[orders] sweep loop crashed: {err!r} -- restarting", flush=True)
 
     @sweep_bonds.before_loop
     async def before_sweep_bonds(self) -> None:

@@ -61,20 +61,51 @@ def build_team_embed(team) -> discord.Embed:
     return panel_embed(team["name"], rows(lines))
 
 
-def build_leaderboard_embed() -> discord.Embed:
+def build_leaderboard_embed(*, this_month: bool = True) -> discord.Embed:
     """Teams by what their people have actually been paid. Ranked, because
-    the point of teams here is that they compete."""
-    board = teams_core.leaderboard()
+    the point of teams here is that they compete -- and windowed to the
+    month by default, because an all-time board freezes: whoever led in
+    week one leads forever and nobody new bothers."""
+    since = teams_core.month_start() if this_month else None
+    board = teams_core.leaderboard(since=since)
     lines = []
     for i, row in enumerate(board, 1):
         size = f"{row['member_count'] + 1} strong"   # +1: the manager works too
-        lines.append(f"{i}. **{row['name']}** {SEP} {money_text(row['paid'])} {SEP} "
+        managed = f" (+{money_text(row['managed'])} managing)" if row["managed"] else ""
+        lines.append(f"{i}. **{row['name']}** {SEP} {money_text(row['worked'])}{managed} {SEP} "
                      f"{row['orders']} order{'s' if row['orders'] != 1 else ''} {SEP} {size}")
     return panel_embed(
-        "Team standings",
-        rows(lines, empty_text="No teams yet."),
+        "Team standings " + ("-- this month" if this_month else "-- all time"),
+        rows(lines, empty_text="Nothing paid out yet this month." if this_month else "No teams yet."),
         footer="Ranked by gold actually paid for completed work",
     )
+
+
+class StandingsView(discord.ui.View):
+    """One toggle between the two windows, on the same message."""
+
+    def __init__(self, owner_id: int, *, this_month: bool = True) -> None:
+        super().__init__(timeout=180)
+        self.owner_id, self.this_month = owner_id, this_month
+        b = discord.ui.Button(
+            label="Show all time" if this_month else "Show this month",
+            style=discord.ButtonStyle.secondary,
+        )
+        b.callback = self._flip
+        self.add_item(b)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("This panel isn't yours.", ephemeral=True)
+            return False
+        return True
+
+    async def _flip(self, interaction: discord.Interaction) -> None:
+        flipped = not self.this_month
+        await interaction.response.edit_message(
+            embed=build_leaderboard_embed(this_month=flipped),
+            view=StandingsView(self.owner_id, this_month=flipped),
+        )
 
 
 def build_no_team_embed(*, can_create: bool) -> discord.Embed:
@@ -227,7 +258,8 @@ class TeamManagerView(discord.ui.View):
 
     async def _standings(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_message(
-            embed=build_leaderboard_embed(), ephemeral=True)
+            embed=build_leaderboard_embed(), view=StandingsView(interaction.user.id),
+            ephemeral=True)
 
     async def _rename(self, interaction: discord.Interaction) -> None:
         async def submitted(inter: discord.Interaction, name: str) -> None:
@@ -264,7 +296,8 @@ class TeamMemberView(discord.ui.View):
     @discord.ui.button(label="Standings", style=discord.ButtonStyle.secondary)
     async def standings(self, interaction: discord.Interaction, _b: discord.ui.Button) -> None:
         await interaction.response.send_message(
-            embed=build_leaderboard_embed(), ephemeral=True)
+            embed=build_leaderboard_embed(), view=StandingsView(interaction.user.id),
+            ephemeral=True)
 
     @discord.ui.button(label="Leave team", style=discord.ButtonStyle.danger)
     async def leave(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
@@ -301,7 +334,8 @@ class TeamJoinView(discord.ui.View):
 
     async def _standings(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_message(
-            embed=build_leaderboard_embed(), ephemeral=True)
+            embed=build_leaderboard_embed(), view=StandingsView(interaction.user.id),
+            ephemeral=True)
 
     async def _create(self, interaction: discord.Interaction) -> None:
         async def submitted(inter: discord.Interaction, name: str) -> None:

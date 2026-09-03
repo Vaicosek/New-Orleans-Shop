@@ -543,7 +543,15 @@ class _ListLandPricingModal(discord.ui.Modal):
             placeholder="Leave blank for bid-only", max_length=10)
         self.duration = discord.ui.TextInput(
             label="Duration, in minutes", placeholder="e.g. 1440 (24h)", max_length=6)
-        for field in (self.min_bid, self.min_increment, self.buy_now, self.duration):
+        # A modal holds five fields at most; this is the fifth. Blank means
+        # an outright sale, the original land model. A figure makes it a
+        # STALL: the winning bid is the deposit, and the winner owes this
+        # much every 30 days or loses the plot -- recurring income from
+        # space in the shop's own district, which is scarce on any server.
+        self.rent = discord.ui.TextInput(
+            label="Rent per 30 days (g), optional", required=False,
+            placeholder="Blank = sold outright. A figure = a stall", max_length=10)
+        for field in (self.min_bid, self.min_increment, self.buy_now, self.duration, self.rent):
             self.add_item(field)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
@@ -554,6 +562,8 @@ class _ListLandPricingModal(discord.ui.Modal):
             duration_minutes = int(str(self.duration.value).strip())
             buy_now_raw = str(self.buy_now.value).strip()
             buy_now_price = int(buy_now_raw) if buy_now_raw else None
+            rent_raw = str(self.rent.value).strip()
+            rent_coins = int(rent_raw) if rent_raw else 0
         except ValueError:
             await interaction.followup.send(
                 "Minimum bid, minimum raise, duration and buy-now (if given) must all be "
@@ -563,7 +573,8 @@ class _ListLandPricingModal(discord.ui.Modal):
             land_id = land_core.open_listing(
                 self.details["name"], self.details["description"], self.details["location"],
                 min_bid, min_increment, duration_minutes,
-                buy_now_price=buy_now_price, created_by=money.user(interaction.user.id),
+                buy_now_price=buy_now_price, rent_coins=rent_coins,
+                created_by=money.user(interaction.user.id),
             )
         except land_core.LandError as err:
             await interaction.followup.send(f"Could not list that plot: {err}", ephemeral=True)
@@ -589,6 +600,7 @@ class _ListLandPricingModal(discord.ui.Modal):
                     post_note = " Posted in the land channel."
 
         buy_now_note = f", buy now {money_text(buy_now_price)}" if buy_now_price else ""
+        buy_now_note += f", then {money_text(rent_coins)} rent every 30 days" if rent_coins else ""
         await interaction.followup.send(
             f"Listed \"{self.details['name']}\" (#{land_id}): minimum bid "
             f"{money_text(min_bid)}{buy_now_note}, closes in {duration_minutes} "
